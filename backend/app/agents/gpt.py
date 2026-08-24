@@ -29,18 +29,33 @@ def _client() -> AsyncOpenAI:
 _DISABLE_THINKING = {"enable_thinking": False}
 
 
-async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str] | None:
+# "다른 후보" 카드가 최대 몇 개까지 노출되는지(frontend/.../SearchResults.tsx의
+# MAX_OTHER_PROPOSALS)와 맞춰, 그만큼의 후보에 대해서만 개별 이유(notes)를
+# 요청한다 - 후보가 90개까지 갈 수 있는 드릴다운 검색에서 전부에 대해
+# 이유를 받으면 토큰 낭비다. 최종 선택(index)이 이 범위 밖으로 나가도
+# 상관없다 - 그 경우 메인 카드는 별도의 reasoning 필드를 쓴다.
+_MAX_CANDIDATE_NOTES = 5
+
+
+async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str, dict[int, str]] | None:
     """11번가 검증 후보(app.debate.run_elevenst_only_debate) 중 가장 추천할
     만한 것을 LLM이 고른다 - 가격만이 아니라 리뷰 수/구매만족도까지 본다.
     실패(키 없음·API 오류·범위 밖 index)하면 None - 호출부가 최저가 규칙
-    기반으로 폴백한다."""
+    기반으로 폴백한다.
+
+    반환하는 dict(notes)는 "다른 후보"로도 노출될 수 있는 상위 후보들 각각에
+    대한 1문장 이유다(2026-08-24 사용자 요청 - "후보 추천해주는 애들도
+    추천하는 이유가 있으면 좋겠다") - 지금까지는 전부 같은 문구("관련도순 -
+    함께 볼만한 상품")를 썼는데, 클릭해보면 실질적인 설명이 없는 것처럼
+    느껴진다는 피드백이었다."""
     if not candidates:
         return None
+    note_indices = list(range(min(_MAX_CANDIDATE_NOTES, len(candidates))))
     try:
         client = _client()
         response = await client.chat.completions.create(
             model=settings.qwen_model,
-            messages=[{"role": "user", "content": build_recommend_prompt(query, candidates)}],
+            messages=[{"role": "user", "content": build_recommend_prompt(query, candidates, note_indices)}],
             response_format={"type": "json_object"},
             extra_body=_DISABLE_THINKING,
         )
@@ -48,6 +63,14 @@ async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str] 
         index = int(data.get("index"))
         if not (0 <= index < len(candidates)):
             return None
-        return index, str(data.get("reasoning") or "").strip()
+        notes: dict[int, str] = {}
+        for key, value in (data.get("notes") or {}).items():
+            try:
+                note_index = int(key)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= note_index < len(candidates) and value:
+                notes[note_index] = str(value).strip()
+        return index, str(data.get("reasoning") or "").strip(), notes
     except Exception:
         return None

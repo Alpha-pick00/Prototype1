@@ -127,8 +127,9 @@ async def run_elevenst_only_debate(
     ranked = await _rank_by_relevance(query, relevant)
 
     recommended = await gpt.recommend_best(query, ranked)
+    candidate_notes: dict[int, str] = {}
     if recommended is not None:
-        index, llm_reasoning = recommended
+        index, llm_reasoning, candidate_notes = recommended
         best = ranked[index]
         # 프롬프트로 "내부 목록 번호를 언급하지 말라"고 지시해도(RECOMMEND_INSTRUCTIONS)
         # DeepSeek/Qwen류 모델은 프롬프트 지시를 놓칠 때가 있다(이 코드베이스에서
@@ -156,19 +157,29 @@ async def run_elevenst_only_debate(
         price_source="elevenst_offer",
         image_url=best.get("image_url"),
     )
-    proposals = [
-        Proposal(
-            agent="elevenst",
-            product_name=it["product_name"],
-            price=f"{it['price_krw']:,}원",
-            retailer=it["seller"],
-            url=it["url"],
-            reasoning="11번가 오픈 API 검증 결과 (관련도순 - 함께 볼만한 상품)",
-            verified=True,
-            image_url=it.get("image_url"),
+    # "다른 후보" 카드도 전부 같은 문구("관련도순 - 함께 볼만한 상품")만 달고
+    # 있으면 클릭해도 실질적인 설명이 없는 것처럼 느껴진다(2026-08-24 사용자
+    # 피드백) - 추천 Agent가 함께 준 후보별 이유(candidate_notes)가 있으면
+    # 그걸 쓰고, 없거나(응답 실패/해당 index 누락) 순번이 새어나오면 기존
+    # 일반 문구로 안전하게 대체한다.
+    fallback_note = "11번가 오픈 API 검증 결과 (관련도순 - 함께 볼만한 상품)"
+    proposals = []
+    for i, it in enumerate(ranked):
+        note = candidate_notes.get(i, "")
+        if _REASONING_LEAKS_INTERNAL_INDEX_RE.search(note):
+            note = ""
+        proposals.append(
+            Proposal(
+                agent="elevenst",
+                product_name=it["product_name"],
+                price=f"{it['price_krw']:,}원",
+                retailer=it["seller"],
+                url=it["url"],
+                reasoning=note or fallback_note,
+                verified=True,
+                image_url=it.get("image_url"),
+            )
         )
-        for it in ranked
-    ]
     return DecideResponse(query=query, proposals=proposals, decision=decision)
 
 
