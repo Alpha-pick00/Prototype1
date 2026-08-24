@@ -45,6 +45,13 @@ export interface ChatTurn {
   // -> "핸드폰 삼성전자"로 좁혀가는 동안 이 값은 계속 "핸드폰"으로 고정된다.
   // checkClarifyFacets가 이걸 base_query로 보내 백엔드 캐시를 재사용한다.
   baseQuery: string;
+  // 다중 선택 지원(2026-08-24, "하나밖에 선택을 못하는데 여러개 선택할 수
+  // 있게") - 드릴다운 체인 전체에 걸쳐 지금까지 고른 {facet 라벨: [값, ...]}를
+  // 누적한다. requestQuery(문자열 이어붙이기)는 표시/캐시 재사용용으로 계속
+  // 쓰지만, 실제 후보 필터링은 이 구조화된 값을 백엔드에 그대로 보내
+  // OR/AND를 정확히 구분한다(문자열만으로는 "브랜드 A 또는 B"를 표현할 수
+  // 없다).
+  facetAnswers: Record<string, string[]>;
   status: TurnStatus;
   result: DecideResult | null;
   errorMessage: string;
@@ -82,7 +89,7 @@ interface SearchContextValue {
   // 하므로, 여기서는 순수하게 시각적 표시 용도다.
   sessionPreferences: Record<string, string>;
   sendMessage: (q: string) => Promise<void>;
-  selectFacets: (turnId: string, selected: Record<string, string>) => Promise<void>;
+  selectFacets: (turnId: string, selected: Record<string, string[]>) => Promise<void>;
   retryTurn: (turnId: string) => Promise<void>;
   editTurn: (turnId: string, newQuery: string) => Promise<void>;
   handleImageUpload: (file: File) => Promise<void>;
@@ -109,11 +116,17 @@ export const dedupeAppend = (base: string, addition: string): string => {
   return [...baseTokens, ...newTokens].join(' ');
 };
 
-const newTurn = (displayQuery: string, requestQuery: string, baseQuery?: string): ChatTurn => ({
+const newTurn = (
+  displayQuery: string,
+  requestQuery: string,
+  baseQuery?: string,
+  facetAnswers?: Record<string, string[]>
+): ChatTurn => ({
   id: crypto.randomUUID(),
   displayQuery,
   requestQuery,
   baseQuery: baseQuery || requestQuery,
+  facetAnswers: facetAnswers ?? {},
   status: 'loading',
   result: null,
   errorMessage: '',
@@ -247,7 +260,8 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     id: string,
     requestQuery: string,
     baseQuery?: string,
-    personaOverride?: Record<string, string>
+    personaOverride?: Record<string, string>,
+    facetAnswers?: Record<string, string[]>
   ) => {
     const skipIntentCheck = requestQuery !== (baseQuery ?? requestQuery);
 
@@ -260,9 +274,13 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
       // 이미 한 축을 답했으므로 다시 묻지 않는다.
       if (!skipIntentCheck && looksAmbiguous(requestQuery)) {
         const persona = { ...sessionPreferences, ...personaOverride };
-        const clarify = await checkClarifyFacets(requestQuery, baseQuery, persona, getStoredToken()).catch(
-          () => null
-        );
+        const clarify = await checkClarifyFacets(
+          requestQuery,
+          baseQuery,
+          persona,
+          getStoredToken(),
+          facetAnswers
+        ).catch(() => null);
         if (clarify && clarify.options.facets.length > 0) {
           patchTurn(id, { status: 'result', result: clarify });
           return;
@@ -285,7 +303,8 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
           }
         },
         undefined,
-        baseQuery
+        baseQuery,
+        facetAnswers
       );
 
       if (streamError || !finalResult) {
@@ -319,32 +338,49 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
   // 드릴다운 체인 전체가 맨 처음 검색어 하나로 고정돼야 백엔드가 매번 그
   // 하나만 캐시해서 재사용할 수 있다(속도 개선, 2026-08-13).
   //
-  // selected가 {라벨: 값}으로 넘어온다(사용자 페르소나, 2026-08-15) - 값
-  // 배열이 아니라 라벨을 같이 받아야 어느 facet에서 이 값을 골랐는지 세션/계정
-  // 페르소나에 정확히 기록할 수 있다.
-  const selectFacets = async (turnId: string, selected: Record<string, string>) => {
+  // selected가 {라벨: [값, ...]}으로 넘어온다(다중 선택 지원, 2026-08-24 - 이전엔
+  // 라벨당 값 하나였는데, "하나밖에 선택을 못하는데 여러개 선택할 수 있게"
+  // 요청으로 배열이 됐다). 라벨을 같이 받아야 어느 facet에서 이 값들을
+  // 골랐는지 세션/계정 페르소나에 정확히 기록하고, 구조화된 facet_answers로
+  // 백엔드에 OR/AND 필터링을 정확히 전달할 수 있다.
+  const selectFacets = async (turnId: string, selected: Record<string, string[]>) => {
     const origin = findTurn(turnId);
     const conversation = conversations.find((c) => c.turns.some((t) => t.id === turnId));
-    const values = Object.values(selected);
-    if (!origin || !conversation || values.length === 0) return;
-    Object.entries(selected).forEach(([label, value]) => rememberPreference(label, value));
-    const combined = values.reduce((acc, value) => dedupeAppend(acc, value), origin.requestQuery).trim();
+    const allValues = Object.values(selected).flat();
+    if (!origin || !conversation || allValues.length === 0) return;
+    Object.entries(selected).forEach(([label, values]) =>
+      values.forEach((value) => rememberPreference(label, value))
+    );
+    const combined = allValues.reduce((acc, value) => dedupeAppend(acc, value), origin.requestQuery).trim();
     // 2026-08-18(사용자 리포트: "핸드폰 한다음에 샤오미 넣었는데 샤오미만 다시
     // 검색되는게 뭐하는거야 '핸드폰 샤오미' 이렇게 전에 했던것도 붙여서 넣어야지")
     // - 실제로 백엔드에 보내는 requestQuery(=combined)는 이미 이전 검색어까지
     // 합쳐져 있었지만, 말풍선에 보여주는 displayQuery는 방금 고른 값만
     // (values.join)이라 마치 이전 맥락이 사라진 것처럼 보였다. 실제 검색어와
     // 화면 표시를 일치시킨다.
-    const turn = newTurn(combined, combined, origin.baseQuery);
+    //
+    // facetAnswers 누적(2026-08-24) - 이전 턴까지 쌓인 값에 이번 턴에서 고른
+    // 값을 라벨별로 합친다(중복 제거) - 드릴다운이 여러 라운드에 걸쳐 이어져도
+    // 구조화된 필터가 안 끊긴다.
+    const accumulatedFacetAnswers: Record<string, string[]> = { ...origin.facetAnswers };
+    for (const [label, values] of Object.entries(selected)) {
+      const existing = accumulatedFacetAnswers[label] ?? [];
+      accumulatedFacetAnswers[label] = Array.from(new Set([...existing, ...values]));
+    }
+    const turn = newTurn(combined, combined, origin.baseQuery, accumulatedFacetAnswers);
     appendTurn(conversation.id, turn);
-    await runTurn(turn.id, turn.requestQuery, turn.baseQuery, selected);
+    const personaOverride: Record<string, string> = {};
+    for (const [label, values] of Object.entries(selected)) {
+      if (values.length > 0) personaOverride[label] = values[values.length - 1];
+    }
+    await runTurn(turn.id, turn.requestQuery, turn.baseQuery, personaOverride, accumulatedFacetAnswers);
   };
 
   const retryTurn = async (turnId: string) => {
     const turn = findTurn(turnId);
     if (!turn) return;
     patchTurn(turnId, { status: 'loading', errorMessage: '', streamingStage: null, streamingProposals: [] });
-    await runTurn(turnId, turn.requestQuery, turn.baseQuery);
+    await runTurn(turnId, turn.requestQuery, turn.baseQuery, undefined, turn.facetAnswers);
   };
 
   // 내 메시지 편집(사용자 요청, "클로드 너처럼 ... 편집기능") - 클로드처럼 편집한

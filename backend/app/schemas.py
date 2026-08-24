@@ -115,6 +115,14 @@ class DecideRequest(BaseModel):
     # (app.preferences)와 병합해 facet 옵션 순서에 소프트하게 반영한다 - 세션
     # 값이 계정 값보다 최신이라 우선한다.
     session_preferences: dict[str, str] | None = None
+    # AI 상세검색 다중 선택(2026-08-24, "하나밖에 선택을 못하는데 여러개 선택할
+    # 수 있게") - 드릴다운 체인 전체에 걸쳐 지금까지 고른 값을 {facet 라벨:
+    # [선택값, ...]}로 누적해 보낸다. 같은 라벨 안 값들은 OR(하나만 맞아도
+    # 통과), 서로 다른 라벨끼리는 AND로 후보를 좁힌다(app.debate.
+    # _filter_items_by_facet_answers). 안 보내면(구버전 프론트, 단순 질의)
+    # query/base_query 문자열 비교 기반의 기존 방식(_filter_items_by_extra_terms)
+    # 으로 폴백한다.
+    facet_answers: dict[str, list[str]] | None = None
 
 
 class PreferenceRecordRequest(BaseModel):

@@ -185,7 +185,8 @@ export async function checkClarifyFacets(
   query: string,
   baseQuery?: string,
   sessionPreferences?: Record<string, string>,
-  token?: string | null
+  token?: string | null,
+  facetAnswers?: Record<string, string[]>
 ): Promise<ClarifyResponse> {
   const response = await fetch(`${API_URL}/decide/clarify`, {
     method: 'POST',
@@ -199,6 +200,7 @@ export async function checkClarifyFacets(
       ...(sessionPreferences && Object.keys(sessionPreferences).length > 0
         ? { session_preferences: sessionPreferences }
         : {}),
+      ...(facetAnswers && Object.keys(facetAnswers).length > 0 ? { facet_answers: facetAnswers } : {}),
     }),
   });
 
@@ -246,7 +248,8 @@ export async function decideStream(
   query: string,
   onEvent: (event: DecideStreamEvent) => void,
   signal?: AbortSignal,
-  baseQuery?: string
+  baseQuery?: string,
+  facetAnswers?: Record<string, string[]>
 ): Promise<void> {
   const response = await fetch(`${API_URL}/decide/stream`, {
     method: 'POST',
@@ -254,6 +257,7 @@ export async function decideStream(
     body: JSON.stringify({
       query,
       ...(baseQuery ? { base_query: baseQuery } : {}),
+      ...(facetAnswers && Object.keys(facetAnswers).length > 0 ? { facet_answers: facetAnswers } : {}),
     }),
     signal,
   });
