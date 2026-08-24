@@ -13,6 +13,11 @@ export interface Proposal {
   // 상품 대표 이미지(2026-08-24) - 11번가 오픈 API ProductImage300을 그대로
   // hotlink한다(backend/fetchers/elevenst.py).
   image_url?: string | null;
+  // "만족도 최고" 배지 계산용(2026-08-24) - SearchResults.tsx가 이 값들로
+  // 직접 비교해서 배지를 붙일 후보를 고른다(백엔드가 승자를 미리 정해서
+  // 주지 않음 - rankByUrl과 같은 이유로 프론트에서 계산).
+  review_count?: number | null;
+  buy_satisfy?: number | null;
   reasoning: string | null;
   error: string | null;
   verified?: boolean | null;

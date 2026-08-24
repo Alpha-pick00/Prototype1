@@ -612,29 +612,17 @@ export const SearchResults = ({
 
   // mode === 'single'
   const { decision, proposals } = result;
-  const winningProposal = proposals.find((p) => p.url === decision.url);
-  const winningProposers = winningProposal?.proposed_by?.length
-    ? winningProposal.proposed_by
-    : [decision.chosen_agent];
 
   // selectedProposalUrl이 가리키는 후보를 찾으면 그걸 메인 카드에 보여준다 -
   // 추가 요청 없이(proposals가 이미 URL/가격까지 다 갖고 있어서) 즉시
-  // 전환된다. AI가 심사로 고른 것과 사용자가 직접 고른 대안을 구분하려고
-  // isAlternate로 라벨/되돌리기 버튼을 분기한다.
+  // 전환된다. "AI추천" 버튼은 최종 추천/다른 후보 상관없이 항상 같은
+  // 자리에 뜨고(2026-08-24, "다른 후보자랑 똑같이 넣어줘"), 최종 추천을
+  // 보는 중엔 이미 selectedProposalUrl이 null이라 눌러도 상태가 안 바뀐다.
   const selectedProposal = selectedProposalUrl
     ? proposals.find((p) => p.url === selectedProposalUrl) ?? null
     : null;
   const isAlternate = selectedProposal != null;
   const displayed = selectedProposal ?? decision;
-  const displayedProposers = isAlternate
-    ? selectedProposal.proposed_by?.length
-      ? selectedProposal.proposed_by
-      : [selectedProposal.agent]
-    : winningProposers;
-  const headerLabel =
-    displayedProposers.length > 1
-      ? `${displayedProposers.map((a) => AGENT_LABEL[a] || a).join(' · ')} 공동 제안 채택`
-      : `${AGENT_LABEL[displayedProposers[0]] || displayedProposers[0]} 제안 채택`;
   // 관련도순으로 이미 정렬돼 있어(app.debate._rank_by_relevance) 상위 4개만
   // 잘라도 가장 관련성 높은 후보가 빠지지 않는다(2026-08-24 사용자 요청 -
   // 후보 전부를 보여주면 카드가 너무 많아 보기 불편함).
@@ -664,22 +652,56 @@ export const SearchResults = ({
     if (p.url && !(p.url in rankByUrl)) rankByUrl[p.url] = nextRank++;
   }
 
+  // "만족도 최고" 배지(2026-08-24, 사용자 요청 - "만족도 최고, AI가 1등으로
+  // 추천 이런식으로 표기") - 리뷰 수가 최소 기준 미만인 후보는 아예 후보에서
+  // 뺀다(리뷰 0건짜리가 "만족도 최고"로 뽑히는 문제 방지, 이전에 실제로
+  // 겪은 버그). AI 1위 추천(decision)은 이미 자기 배지가 있으니 여기 풀에서
+  // 제외해 배지 두 개가 한 카드에 겹치지 않게 한다. 기준 미달이면 아예 배지
+  // 자체를 안 보여준다(억지로 승자를 만들지 않는다).
+  const MIN_REVIEWS_FOR_SATISFACTION_BADGE = 5;
+  const satisfactionCandidates = proposals.filter(
+    (p) => p.url && p.url !== decision.url && (p.review_count ?? 0) >= MIN_REVIEWS_FOR_SATISFACTION_BADGE
+  );
+  const mostSatisfied = satisfactionCandidates.reduce<Proposal | null>((best, p) => {
+    if (!best) return p;
+    const pScore = [p.buy_satisfy ?? 0, p.review_count ?? 0];
+    const bestScore = [best.buy_satisfy ?? 0, best.review_count ?? 0];
+    return pScore[0] > bestScore[0] || (pScore[0] === bestScore[0] && pScore[1] > bestScore[1]) ? p : best;
+  }, null);
+  const mostSatisfiedUrl = mostSatisfied?.url ?? null;
+
+  const TopBadge = ({ url }: { url: string | null | undefined }) => {
+    if (!url) return null;
+    if (url === decision.url) {
+      return (
+        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-neutral-950 text-white">
+          AI 1위 추천
+        </span>
+      );
+    }
+    if (url === mostSatisfiedUrl) {
+      return (
+        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#4ADE80]/15 text-[#166534]">
+          만족도 최고
+        </span>
+      );
+    }
+    return null;
+  };
+
   return (
     <Card>
       <div className="flex items-center mb-4">
-        {isAlternate ? (
-          <button
-            type="button"
-            onClick={() => setSelectedProposalUrl(null)}
-            className="text-xs font-mono uppercase tracking-widest text-neutral-400 hover:text-neutral-950 transition-colors"
-          >
-            AI추천
-          </button>
-        ) : (
-          <span className="text-xs font-mono uppercase tracking-widest text-neutral-400">
-            최종 추천 · {headerLabel}
-          </span>
-        )}
+        <button
+          type="button"
+          // 최종 추천을 보는 중일 땐 이미 null이라 눌러도 상태 변화가 없다 -
+          // 다른 후보를 볼 때와 똑같은 자리에 똑같이 "AI추천"을 보여달라는
+          // 요청(2026-08-24)이라 isAlternate 여부와 무관하게 항상 렌더링한다.
+          onClick={() => setSelectedProposalUrl(null)}
+          className="text-xs font-mono uppercase tracking-widest text-neutral-400 hover:text-neutral-950 transition-colors"
+        >
+          AI추천
+        </button>
       </div>
       <a
         href={displayed.url ?? undefined}
@@ -695,7 +717,8 @@ export const SearchResults = ({
             rank={displayed.url ? rankByUrl[displayed.url] : undefined}
           />
           <div className="min-w-0">
-            <p className="text-lg font-medium text-neutral-950">{displayed.product_name}</p>
+            <TopBadge url={displayed.url} />
+            <p className="mt-1 text-lg font-medium text-neutral-950">{displayed.product_name}</p>
             <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
             <p className="mt-1.5 text-sm font-light text-neutral-600 leading-relaxed break-keep">{displayed.reasoning}</p>
           </div>
@@ -744,6 +767,7 @@ export const SearchResults = ({
                       rank={matched.url ? rankByUrl[matched.url] : undefined}
                     />
                     <div className="min-w-0 flex flex-col items-start gap-1">
+                      <TopBadge url={matched.url} />
                       <span className="text-xs font-medium text-neutral-950">{g.label}</span>
                       <span className="text-xs font-light text-neutral-500 leading-relaxed">{g.description}</span>
                       <span className="text-xs font-light text-neutral-600 mt-1">
@@ -766,9 +790,15 @@ export const SearchResults = ({
             <span className="text-[11px] font-mono uppercase tracking-widest text-neutral-400 block mb-2">
               다른 후보
             </span>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* 2026-08-24 사용자 요청 - 후보가 2개나 4개면 2열 그리드가 꽉
+                차서 예쁜데, 3개면 2+1로 어중간하게 남는다. 3개일 때만 3열
+                한 줄로 바꾸고, 카드도 가로형(이미지 왼쪽) 대신 세로형
+                (이미지 위, 텍스트 아래)으로 바꿔 좁은 칸에서도 정사각형에
+                가깝게 보이게 한다. */}
+            <div className={`grid grid-cols-1 gap-4 ${otherProposals.length === 3 ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
               {otherProposals.map((p, i) => {
                 const isPickable = !p.error && !!p.url && !!p.product_name;
+                const isSquare = otherProposals.length === 3;
                 return (
                   <button
                     key={p.url ?? i}
@@ -781,9 +811,9 @@ export const SearchResults = ({
                     // 버그 리포트 - "다른 후보 보고 1번으로 돌아가면 요약본으로
                     // 뜬다").
                     onClick={() => isPickable && setSelectedProposalUrl(p.url === decision.url ? null : p.url)}
-                    className={`flex items-start gap-3 text-sm text-left rounded-lg -mx-2 px-3 py-2.5 transition-colors ${
-                      isPickable ? 'hover:bg-black/[0.03] cursor-pointer' : 'cursor-default'
-                    }`}
+                    className={`flex gap-3 text-sm rounded-lg -mx-2 px-3 py-2.5 transition-colors ${
+                      isSquare ? 'flex-col items-center text-center' : 'items-start text-left'
+                    } ${isPickable ? 'hover:bg-black/[0.03] cursor-pointer' : 'cursor-default'}`}
                   >
                     <ProductThumbnail
                       src={p.image_url}
@@ -791,9 +821,10 @@ export const SearchResults = ({
                       size="sm"
                       rank={p.url ? rankByUrl[p.url] : undefined}
                     />
-                    <div className="min-w-0 flex-1">
+                    <div className={`min-w-0 flex-1 ${isSquare ? 'flex flex-col items-center' : ''}`}>
+                      <TopBadge url={p.url} />
                       <ProposedByChips proposedBy={p.proposed_by} />
-                      <p className="mt-1 font-light text-neutral-600 truncate">
+                      <p className={`mt-1 font-light text-neutral-600 ${isSquare ? 'line-clamp-2' : 'truncate'}`}>
                         {p.error ? p.error : `${p.product_name} · ${p.price || '가격 미확인'}`}
                       </p>
                       {!p.error && p.reasoning && (
