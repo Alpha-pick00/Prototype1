@@ -297,7 +297,19 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
           } else if (event.type === 'proposal') {
             appendStreamingProposal(id, event.proposal);
           } else if (event.type === 'final') {
+            // 체감 속도 개선(2026-08-24) - 메인 추천이 끝나는 대로 바로
+            // 화면에 반영한다("다른 후보"의 개별 이유는 아직 일반 문구일 수
+            // 있음 - notes 이벤트가 오면 마저 채워진다). 예전엔 스트림이 다
+            // 끝날 때까지 화면 반영 자체를 미뤘었다.
             finalResult = event.result;
+            patchTurn(id, { status: 'result', result: event.result });
+          } else if (event.type === 'notes') {
+            // "다른 후보" 개별 이유가 뒤늦게 도착 - 이미 그려둔 카드의 이유
+            // 텍스트만 갈아끼운다(상품명/가격/이미지는 final에서 이미 확정).
+            if (finalResult && finalResult.mode === 'single') {
+              finalResult = { ...finalResult, proposals: event.proposals };
+              patchTurn(id, { result: finalResult });
+            }
           } else if (event.type === 'error') {
             streamError = event.message;
           }
@@ -310,7 +322,6 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
       if (streamError || !finalResult) {
         throw new ApiError(streamError || '요청 중 문제가 발생했습니다. 잠시 후 다시 시도해주세요.');
       }
-      patchTurn(id, { status: 'result', result: finalResult });
       persistHistoryEntry(requestQuery, finalResult).catch(() => {});
     } catch (err) {
       patchTurn(id, {

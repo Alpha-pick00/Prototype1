@@ -236,6 +236,12 @@ export type DecideStreamEvent =
   | { type: 'status'; stage: DecideStage }
   | { type: 'proposal'; proposal: Proposal }
   | { type: 'final'; result: DecideResult }
+  // 체감 속도 개선(2026-08-24) - final은 메인 추천이 끝나는 대로 먼저 오고,
+  // "다른 후보" 각각의 개별 이유(gpt.candidate_notes)는 보통 더 느려서
+  // final에는 일반 문구로만 채워져 있다. 그 이유가 뒤늦게 준비되면 이
+  // 이벤트로 갱신된 proposals 전체를 한 번 더 보내준다 - mode==='single'일
+  // 때만 온다(app.debate.run_elevenst_only_debate_stream 참고).
+  | { type: 'notes'; proposals: Proposal[] }
   | { type: 'error'; message: string };
 
 /** /decide와 같은 일을 하지만, 서버가 단계별로 흘려보내는 NDJSON(줄바꿈으로 구분된 JSON)을
