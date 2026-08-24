@@ -50,12 +50,31 @@ async def _search_elevenst_categories(query: str) -> list[elevenst.ElevenstCateg
         return []
 
 
+# 2026-08-24 실측("아이간식" 검색 시 "자동 제면기 파스타 기계 식사준비
+# 건강식 아이간식 식당 업소용..."이 관련 상품으로 통과) - token_set_ratio는
+# 질의 토큰이 후보 상품명에 전부 부분집합으로 들어있기만 하면 나머지가
+# 아무리 길고 무관해도(키워드 도배) 100점을 준다. token_sort_ratio는
+# 길이·순서 차이에 민감해서 이런 도배 상품명을 가려낸다 - 실측: 진짜
+# "아이간식" 떡 상품 34~38점, 무관한 파스타 기계 16.7점.
+#
+# 20이 아니라 18인 이유(회귀 발견, test_query_variants) - "이프로"(3글자
+# 짧은 질의)처럼 검색어 자체가 짧고 후보 상품명이 정상적으로 길기만 해도
+# (도배가 아니라 그냥 상세한 상품명) token_sort_ratio가 자연히 낮게 나온다
+# (실측: "이프로" vs "이프로 부족할때 제로 복숭아 500ml x 24개" = 19.99점 -
+# 20 기준이면 정상 매칭을 걸러내는 회귀가 생겼다). 18로 낮추면 그 정상
+# 케이스(19.99)는 통과하면서 파스타 기계(16.7)는 여전히 걸러진다 - 두
+# 실측값을 정확히 가르는 경계.
+_MIN_TOKEN_SORT_RATIO = 18
+
+
 def _product_name_matches(decision_name: str, candidate_name: str) -> bool:
     """검색 결과 상품명(candidate_name)이 실제로 질의/결정된 상품명
-    (decision_name)과 같은 상품인지 3단계로 판정한다 - app.debate의
+    (decision_name)과 같은 상품인지 판정한다 - app.debate의
     run_elevenst_only_debate/run_brand_price가 검색 결과를 후보로 받아들이기
     전 관련성 가드로 쓴다."""
     if fuzz.token_set_ratio(decision_name, candidate_name) < NAME_SIMILARITY_THRESHOLD:
+        return False
+    if fuzz.token_sort_ratio(decision_name, candidate_name) < _MIN_TOKEN_SORT_RATIO:
         return False
     if model_or_quantity_conflict(decision_name, candidate_name):
         return False
