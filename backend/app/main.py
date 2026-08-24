@@ -192,7 +192,9 @@ async def decide(request: DecideRequest, background_tasks: BackgroundTasks) -> D
         # 쓴다 - 이 경로엔 애초에 되묻기(clarify)가 없다. base_query가
         # 있으면(AI 상세검색 드릴다운 후속 턴) 재검색 대신 구조적 필터링으로
         # 좁힌다(_search_candidates 참고).
-        result = await run_elevenst_only_debate(request.query, base_query=request.base_query)
+        result = await run_elevenst_only_debate(
+            request.query, base_query=request.base_query, facet_answers=request.facet_answers
+        )
     except (RuntimeError, ValueError) as exc:
         # RuntimeError: 제안 전부 실패, ValueError: judge 응답에서 JSON을 못 찾음
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -219,7 +221,9 @@ async def decide_stream(request: DecideRequest) -> StreamingResponse:
         try:
             # 메인 검색 흐름은 decide()와 같은 이유로 run_elevenst_only_debate_stream을
             # 쓴다(위 decide() 주석 참고 - clarify 개념이 없다).
-            async for event in run_elevenst_only_debate_stream(request.query, base_query=request.base_query):
+            async for event in run_elevenst_only_debate_stream(
+                request.query, base_query=request.base_query, facet_answers=request.facet_answers
+            ):
                 if event["type"] == "final":
                     result = DecideResponse.model_validate(event["result"])
                 yield json.dumps(event) + "\n"
@@ -262,7 +266,12 @@ async def decide_clarify(
         persona.update(preferences.get_top_preferences(user))
     if request.session_preferences:
         persona.update(request.session_preferences)
-    return await check_clarify_facets(request.query, base_query=request.base_query, persona=persona)
+    return await check_clarify_facets(
+        request.query,
+        base_query=request.base_query,
+        persona=persona,
+        facet_answers=request.facet_answers,
+    )
 
 
 @app.post("/decide/elevenst-only", response_model=DecideResponse)
@@ -270,7 +279,9 @@ async def decide_elevenst_only(request: DecideRequest) -> DecideResponse:
     """/decide와 실질적으로 같은 경로(run_elevenst_only_debate)를 별도
     엔드포인트로도 노출해둔다(로컬 실험/검증 전용, 프론트엔드는 쓰지 않음)."""
     try:
-        return await run_elevenst_only_debate(request.query, base_query=request.base_query)
+        return await run_elevenst_only_debate(
+            request.query, base_query=request.base_query, facet_answers=request.facet_answers
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:

@@ -147,6 +147,11 @@ class _Group:
         price_krw = cheapest.price_krw
         retailer = cheapest.retailer
         url = cheapest.url
+        # 이미지는 다나와 출신 멤버만 갖고 있다(다른 에이전트는 LLM이 지어내지
+        # 않도록 애초에 안 채움) - cheapest에 없으면 그룹 내 다른 멤버에서라도 가져온다.
+        image_url = cheapest.image_url or next(
+            (m.image_url for _, m in self.members if m.image_url), None
+        )
 
         member_norm_urls = {normalize_url(m.url) for _, m in self.members if m.url}
         conflict_counts = [
@@ -158,6 +163,7 @@ class _Group:
             "price_krw": price_krw,
             "url": url,
             "retailer": retailer,
+            "image_url": image_url,
             "reasons": [m.reasoning for _, m in self.members if m.reasoning],
             "proposed_by": [a for a, _ in self.members],
             "signals": {},

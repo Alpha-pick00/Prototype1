@@ -41,18 +41,27 @@ async def _rank_by_relevance(
     return [it for it, _ in scored]
 
 
-async def _search_candidates(query: str, base_query: str | None) -> list[elevenst.ElevenstSearchItem]:
+async def _search_candidates(
+    query: str,
+    base_query: str | None,
+    facet_answers: dict[str, list[str]] | None = None,
+) -> list[elevenst.ElevenstSearchItem]:
     """HITL 드릴다운(2026-08-20 재설계, "쿼리 재구성해서 검색하는 거나
     다름없다" 지적) - base_query가 없으면(단발 질의) 그 질의로 좁게(10개)
     검색해 끝낸다. base_query가 있으면(AI 상세검색을 거쳐 facet을 answer로
     덧붙인 드릴다운 질의) 매번 새로 조합된 전체 문자열로 재검색하지 않는다 -
     check_clarify_facets와 똑같이 안정적인 base_query로 넓게(90개) 검색한
-    뒤, 그 위에 사용자가 덧붙인 답(facet 값들)을 _filter_items_by_extra_terms로
-    구조적으로(순수 로컬 필터링, 추가 네트워크 요청 없음) 좁힌다 - 매 라운드
-    새 문자열을 만들어 11번가를 다시 때리는 대신, 검증된 후보군 자체를
-    필터링해 나간다."""
+    뒤, 그 위에 사용자가 덧붙인 답(facet 값들)을 구조적으로(순수 로컬 필터링,
+    추가 네트워크 요청 없음) 좁힌다 - 매 라운드 새 문자열을 만들어 11번가를
+    다시 때리는 대신, 검증된 후보군 자체를 필터링해 나간다.
+
+    facet_answers(2026-08-24, 다중 선택 지원)가 있으면 그걸로 필터링한다(같은
+    facet 안 값은 OR, facet끼리는 AND) - 없으면(구버전 요청) query/base_query
+    문자열 비교 기반의 기존 방식으로 폴백한다."""
     if base_query and base_query.strip() and base_query.strip() != query.strip():
         items = await elevenst.search_elevenst(base_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT)
+        if facet_answers:
+            return _filter_items_by_facet_answers(items, facet_answers)
         return _filter_items_by_extra_terms(items, query, base_query)
     return await elevenst.search_elevenst(query, limit=10)
 
@@ -76,7 +85,9 @@ async def _search_with_query_variants(query: str) -> list[elevenst.ElevenstSearc
     return []
 
 
-async def run_elevenst_only_debate(query: str, base_query: str | None = None) -> DecideResponse:
+async def run_elevenst_only_debate(
+    query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
+) -> DecideResponse:
     """11번가 오픈 API(ProductSearch)로 검색한다(_search_candidates - base_query가
     있으면 재검색 대신 구조적 필터링). _product_name_matches로 질의와 실제로
     맞는 상품만 후보(검증된 후보군)로 남기고, Qwen 임베딩으로 관련도순
@@ -84,9 +95,23 @@ async def run_elevenst_only_debate(query: str, base_query: str | None = None) ->
     목록으로 노출한다. 최종 추천은 추천 Agent(gpt.recommend_best, 가격뿐
     아니라 리뷰·구매만족도까지 고려)가 고르고, 실패하면(키 없음·API 오류)
     최저가 규칙 기반으로 폴백한다. 관련 상품을 하나도 못 찾으면 Groq이
-    제안한 대안 표기로 재검색한다(_search_with_query_variants)."""
-    items = await _search_candidates(query, base_query)
-    relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
+    제안한 대안 표기로 재검색한다(_search_with_query_variants).
+
+    facet_answers가 있으면(다중 선택) _product_name_matches 재검사를 건너뛴다
+    (2026-08-24 버그 리포트, "카테고리를 여러개 고르면 그중에 하나라도
+    포함되어 있으면 검색 결과를 가지고 올 수 있게 해야해") - _search_candidates가
+    이미 _filter_items_by_facet_answers로 관련성을 구조적으로 보장했는데,
+    같은 facet에서 고른 값 여러 개(예: "갤럭시S25", "갤럭시S26")가 한 query
+    문자열에 다 들어가면 spec_match.model_or_quantity_conflict가 "같은
+    family(갤럭시S#)의 값 집합이 다르다"고 오판해 둘 중 하나만 있는 상품을
+    전부 걸러내 버렸다(실측 확인) - OR로 고른 걸 사실상 AND로 요구하는
+    버그였다."""
+    items = await _search_candidates(query, base_query, facet_answers)
+    relevant = (
+        items
+        if facet_answers
+        else [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
+    )
     if not relevant:
         relevant = await _search_with_query_variants(query)
     if not relevant:
@@ -132,14 +157,14 @@ async def run_elevenst_only_debate(query: str, base_query: str | None = None) ->
 
 
 async def run_elevenst_only_debate_stream(
-    query: str, base_query: str | None = None
+    query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
 ) -> AsyncIterator[dict[str, Any]]:
     """run_elevenst_only_debate()의 스트리밍 버전 - 메인 검색 흐름
     (/decide/stream)이 이 경로를 쓴다. status 이벤트 하나(진행 표시용) 후
     final 이벤트 하나를 내보낸다."""
     yield {"type": "status", "stage": "searching"}
     try:
-        result = await run_elevenst_only_debate(query, base_query=base_query)
+        result = await run_elevenst_only_debate(query, base_query=base_query, facet_answers=facet_answers)
     except RuntimeError as exc:
         yield {"type": "error", "message": str(exc)}
         return
@@ -181,6 +206,32 @@ def _filter_items_by_extra_terms(
         item
         for item in items
         if all(term in _normalize_for_match(item["product_name"]) for term in extra_tokens)
+    ]
+    return filtered if len(filtered) >= MIN_FILTERED_CLARIFY_ITEMS else items
+
+
+def _filter_items_by_facet_answers(
+    items: list[elevenst.ElevenstSearchItem], facet_answers: dict[str, list[str]]
+) -> list[elevenst.ElevenstSearchItem]:
+    """다중 선택 지원(2026-08-24, "하나밖에 선택을 못하는데 여러개 선택할 수
+    있게") - facet_answers는 {facet 라벨: [선택값, ...]}. 같은 facet 안에서
+    고른 값끼리는 OR(하나만 상품명에 있어도 통과 - "빨강 또는 파랑"), 서로
+    다른 facet끼리는 _filter_items_by_extra_terms와 같은 AND(모든 facet을
+    만족해야 통과)로 좁힌다. _filter_items_by_extra_terms처럼 순수 로컬
+    필터링(추가 네트워크 요청 없음)이고, 결과가 너무 적으면(표본이 좁아
+    facet 품질이 나빠질 수 있음) 필터링을 포기하고 원래 표본을 그대로 쓴다."""
+    groups = [
+        [_normalize_for_match(v) for v in values] for values in facet_answers.values() if values
+    ]
+    if not groups:
+        return items
+    filtered = [
+        item
+        for item in items
+        if all(
+            any(term in _normalize_for_match(item["product_name"]) for term in group)
+            for group in groups
+        )
     ]
     return filtered if len(filtered) >= MIN_FILTERED_CLARIFY_ITEMS else items
 
@@ -568,7 +619,10 @@ def _strip_query_answered_options(query: str, facets: list[ClarifyFacet]) -> lis
 
 
 async def check_clarify_facets(
-    query: str, base_query: str | None = None, persona: dict[str, str] | None = None
+    query: str,
+    base_query: str | None = None,
+    persona: dict[str, str] | None = None,
+    facet_answers: dict[str, list[str]] | None = None,
 ) -> ClarifyResponse:
     """AI 상세검색(2026-08-12 요청) - "음료수"처럼 짧고 애매한 검색어를 11번가
     실제 검색 결과 상품명에 근거해 몇 가지 기준(facet)으로 좁혀나가도록 DeepSeek에게
@@ -627,7 +681,11 @@ async def check_clarify_facets(
     # 축들이 아래 _filter_items_by_extra_terms로 표본을 구조적으로 좁혀
     # 나간다(순서는 _facet_sort_key가 매 라운드 표본 기준으로 동적으로 정한다).
     if base_query and base_query.strip() and base_query.strip() != query.strip():
-        items = _filter_items_by_extra_terms(items, query, base_query)
+        items = (
+            _filter_items_by_facet_answers(items, facet_answers)
+            if facet_answers
+            else _filter_items_by_extra_terms(items, query, base_query)
+        )
     names = [item["product_name"] for item in items]
     facets = await _extract_facets(query, names, persona)
     facets = [f for f in facets if f.label != "카테고리"]

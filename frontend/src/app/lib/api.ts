@@ -8,6 +8,9 @@ export interface Proposal {
   price: string | null;
   retailer: string | null;
   url: string | null;
+  // 다나와 실측 페이지에서 스크래핑한 대표 상품 이미지 - danawa 출신 후보에만
+  // 채워진다(LLM이 지어낸 값이 아님).
+  image_url?: string | null;
   reasoning: string | null;
   error: string | null;
   verified?: boolean | null;
@@ -20,6 +23,7 @@ export interface Decision {
   price: string;
   retailer: string;
   url: string;
+  image_url?: string | null;
   reasoning: string;
   chosen_agent: AgentName;
 }
@@ -181,7 +185,8 @@ export async function checkClarifyFacets(
   query: string,
   baseQuery?: string,
   sessionPreferences?: Record<string, string>,
-  token?: string | null
+  token?: string | null,
+  facetAnswers?: Record<string, string[]>
 ): Promise<ClarifyResponse> {
   const response = await fetch(`${API_URL}/decide/clarify`, {
     method: 'POST',
@@ -195,6 +200,7 @@ export async function checkClarifyFacets(
       ...(sessionPreferences && Object.keys(sessionPreferences).length > 0
         ? { session_preferences: sessionPreferences }
         : {}),
+      ...(facetAnswers && Object.keys(facetAnswers).length > 0 ? { facet_answers: facetAnswers } : {}),
     }),
   });
 
@@ -242,7 +248,8 @@ export async function decideStream(
   query: string,
   onEvent: (event: DecideStreamEvent) => void,
   signal?: AbortSignal,
-  baseQuery?: string
+  baseQuery?: string,
+  facetAnswers?: Record<string, string[]>
 ): Promise<void> {
   const response = await fetch(`${API_URL}/decide/stream`, {
     method: 'POST',
@@ -250,6 +257,7 @@ export async function decideStream(
     body: JSON.stringify({
       query,
       ...(baseQuery ? { base_query: baseQuery } : {}),
+      ...(facetAnswers && Object.keys(facetAnswers).length > 0 ? { facet_answers: facetAnswers } : {}),
     }),
     signal,
   });

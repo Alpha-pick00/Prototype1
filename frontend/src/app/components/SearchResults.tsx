@@ -177,8 +177,9 @@ interface Props {
   sessionPreferences?: Record<string, string>;
   // (사용자 페르소나, 2026-08-15) label -> 선택값 맵을 그대로 넘긴다 - 값
   // 배열만 받으면 SearchContext가 어느 facet 라벨에서 이 값을 골랐는지 몰라
-  // 계정/세션 페르소나에 기록할 수 없다.
-  onConfirmFacets: (selected: Record<string, string>) => void;
+  // 계정/세션 페르소나에 기록할 수 없다. 다중 선택 지원(2026-08-24)으로 값
+  // 하나가 아니라 배열이다 - 같은 facet에서 여러 개를 고를 수 있다(OR로 검색).
+  onConfirmFacets: (selected: Record<string, string[]>) => void;
 }
 
 export const SearchResults = ({
@@ -193,7 +194,9 @@ export const SearchResults = ({
   // 선택해도 넘어갈 수 있게") 지금은 "검색하기" 버튼을 눌러야 그 시점까지 고른
   // 값(일부만 골랐어도 그대로)으로 진행한다. facets는 mode==='clarify'일 때만
   // 존재하지만 Hooks는 조건부로 못 부르니 다른 모드에서는 빈 배열로 둔다.
-  const [selectedFacets, setSelectedFacets] = useState<Record<string, string>>({});
+  // 다중 선택 지원(2026-08-24, "하나밖에 선택을 못하는데 여러개 선택할 수
+  // 있게") - facet 라벨 하나에 값 여러 개를 담을 수 있다(OR로 검색됨).
+  const [selectedFacets, setSelectedFacets] = useState<Record<string, string[]>>({});
   const [facetQuery, setFacetQuery] = useState<Record<string, string>>({});
   // GPT 쇼핑의 "이거랑 비슷한거 더" 패턴 벤치마킹(2026-08-18, 사용자 요청
   // "GPT 쇼핑의 장점을 잘 접목시켜줘") - judge가 고른 최종 추천 하나만
@@ -230,39 +233,50 @@ export const SearchResults = ({
   // 초코파이 바나나를 골랏다면 용량에 없는것들은 선택할수없게" - 브랜드 전용
   // 특수 케이스였던 걸 모든 facet 쌍으로 일반화했다). 여러 facet을 골랐으면
   // 각각의 options_by_selection을 교집합으로 겹쳐 좁힌다.
-  const visibleOptionsFor = (facet: ClarifyFacetType, selected: Record<string, string>): string[] => {
+  // 다중 선택(2026-08-24) - 한 facet에서 여러 값을 고를 수 있어, 다른
+  // facet의 옵션을 좁힐 때도 그 값들 각각의 options_by_selection을
+  // 합집합(OR)으로 겹친다 - "이 값 중 아무거나와 공존 가능한 옵션"이어야
+  // "브랜드에 오리온·롯데 둘 다 고름 -> 둘 중 아무 브랜드에나 있는 용량은
+  // 계속 보여야 함"이 성립한다.
+  const visibleOptionsFor = (facet: ClarifyFacetType, selected: Record<string, string[]>): string[] => {
     let options = facet.options;
-    for (const [otherLabel, value] of Object.entries(selected)) {
-      if (otherLabel === facet.label) continue;
-      const filtered = facet.options_by_selection?.[value];
-      if (filtered) {
-        options = options.filter((o) => filtered.includes(o));
-      }
+    for (const [otherLabel, values] of Object.entries(selected)) {
+      if (otherLabel === facet.label || values.length === 0) continue;
+      const filteredSets = values
+        .map((v) => facet.options_by_selection?.[v])
+        .filter((s): s is string[] => !!s);
+      if (filteredSets.length === 0) continue;
+      const union = new Set(filteredSets.flat());
+      options = options.filter((o) => union.has(o));
     }
     return options;
   };
 
   const computeNextSelectedFacets = (
-    prev: Record<string, string>,
+    prev: Record<string, string[]>,
     label: string,
     option: string
-  ): Record<string, string> => {
-    if (prev[label] === option) {
-      const next = { ...prev };
-      delete next[label];
-      return next;
+  ): Record<string, string[]> => {
+    const current = prev[label] ?? [];
+    const next: Record<string, string[]> = { ...prev };
+    if (current.includes(option)) {
+      const remaining = current.filter((v) => v !== option);
+      if (remaining.length > 0) next[label] = remaining;
+      else delete next[label];
+    } else {
+      next[label] = [...current, option];
     }
-    const next = { ...prev, [label]: option };
-    // 이 선택으로 다른 facet의 보이는 옵션이 바뀌어 기존 선택이 더 이상
-    // 유효한 값이 아니게 됐으면 지운다 - 안 그러면 서로 안 맞는 조합(예:
-    // "초코파이 바나나" + "336g")이 그대로 남아있을 수 있다.
+    // 이 선택으로 다른 facet의 보이는 옵션이 바뀌어 기존 선택 중 일부(또는
+    // 전부)가 더 이상 유효한 값이 아니게 됐으면 지운다 - 안 그러면 서로 안
+    // 맞는 조합(예: "초코파이 바나나" + "336g")이 그대로 남아있을 수 있다.
     for (const other of displayFacets) {
       if (other.label === label) continue;
       const selectedForOther = next[other.label];
-      if (!selectedForOther) continue;
-      if (!visibleOptionsFor(other, next).includes(selectedForOther)) {
-        delete next[other.label];
-      }
+      if (!selectedForOther || selectedForOther.length === 0) continue;
+      const visible = visibleOptionsFor(other, next);
+      const stillValid = selectedForOther.filter((v) => visible.includes(v));
+      if (stillValid.length === 0) delete next[other.label];
+      else if (stillValid.length !== selectedForOther.length) next[other.label] = stillValid;
     }
     return next;
   };
@@ -290,19 +304,27 @@ export const SearchResults = ({
   // 들어간 값이 있으면 그게 우선한다.
   const pendingFreeTextFacets: Record<string, string> = {};
   for (const facet of displayFacets) {
-    if (selectedFacets[facet.label]) continue;
+    if (selectedFacets[facet.label]?.length) continue;
     const typed = (facetQuery[facet.label] ?? '').trim();
     if (!typed) continue;
     const opts = visibleOptionsFor(facet, selectedFacets);
     const hasMatch = opts.some((o) => o.toLowerCase().includes(typed.toLowerCase()));
     if (!hasMatch) pendingFreeTextFacets[facet.label] = typed;
   }
-  const effectiveSelectedFacets = { ...selectedFacets, ...pendingFreeTextFacets, ...appliedFreeText };
+  // 타이핑한 자유 텍스트 값은 그 facet에 이미 버튼으로 고른 값이 있어도
+  // 대체하지 않고 추가한다(다중 선택, 2026-08-24) - 버튼 선택과 타이핑을
+  // 섞어 쓸 수 있어야 한다.
+  const effectiveSelectedFacets: Record<string, string[]> = { ...selectedFacets };
+  for (const [label, value] of Object.entries({ ...pendingFreeTextFacets, ...appliedFreeText })) {
+    const existing = effectiveSelectedFacets[label] ?? [];
+    if (!existing.includes(value)) effectiveSelectedFacets[label] = [...existing, value];
+  }
 
   useEffect(() => {
     if (result.mode !== 'clarify') return;
     if (Object.keys(pendingFreeTextFacets).length === 0) return;
     const combined = Object.values(effectiveSelectedFacets)
+      .flat()
       .reduce((acc, v) => dedupeAppend(acc, v), result.query)
       .trim();
     if (!combined || combined === lastLiveFetchRef.current) return;
@@ -413,7 +435,7 @@ export const SearchResults = ({
               <div className="flex flex-wrap gap-2">
                 {visibleOptions.length > 0 ? (
                   visibleOptions.map((option) => {
-                    const isSelected = selectedFacets[facet.label] === option;
+                    const isSelected = selectedFacets[facet.label]?.includes(option) ?? false;
                     // 사용자 페르소나(2026-08-15) - 이번 세션에서 이 라벨에 이미
                     // 골랐던 값이면 별 표시로 "평소 선택"임을 알려준다. 옵션
                     // 순서 자체(맨 앞으로 당기기)는 백엔드가 이미 반영했으니
@@ -562,9 +584,22 @@ export const SearchResults = ({
         rel="noopener noreferrer"
         className="group flex items-start justify-between gap-4 mb-3"
       >
-        <div className="min-w-0">
-          <p className="text-lg font-medium text-neutral-950">{displayed.product_name}</p>
-          <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
+        <div className="flex items-start gap-3 min-w-0">
+          {displayed.image_url && (
+            <img
+              src={displayed.image_url}
+              alt={displayed.product_name ?? ''}
+              className="w-16 h-16 shrink-0 rounded-lg object-cover border border-black/5 bg-white"
+              loading="lazy"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none';
+              }}
+            />
+          )}
+          <div className="min-w-0">
+            <p className="text-lg font-medium text-neutral-950">{displayed.product_name}</p>
+            <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
+          </div>
         </div>
         <div className="shrink-0 flex items-center gap-2">
           <span className="text-xl font-medium text-neutral-950 whitespace-nowrap">
