@@ -2,11 +2,12 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-# "danawa": PART 4-2(2026-08-11 지시서) - 다나와 A등급 최저가 후보가 judge의
-# 선택 대상 풀에 직접 들어간다. 프론트엔드는 AGENT_LABEL[agent] || agent로
+# "danawa"/"gpt"/"groq"/"deepseek"는 과거(다나와 실측 + LLM 멀티에이전트
+# 파이프라인 시절) 저장된 기록(app.history DB) 호환용으로 남겨둔다 - 새로
+# 만드는 값은 "elevenst"뿐이다. 프론트엔드는 AGENT_LABEL[agent] || agent로
 # 렌더링해(frontend/src/app/components/SearchResults.tsx) 모르는 값이 와도
-# 원문 그대로 표시할 뿐 깨지지 않는다 - 확인 후 추가했다.
-AgentName = Literal["gpt", "groq", "deepseek", "danawa"]
+# 원문 그대로 표시할 뿐 깨지지 않는다.
+AgentName = Literal["gpt", "groq", "deepseek", "danawa", "elevenst"]
 AuthProvider = Literal["google", "kakao", "naver"]
 
 
@@ -23,8 +24,10 @@ class Proposal(BaseModel):
     price: str | None = None
     retailer: str | None = None
     url: str | None = None
-    # 다나와 실측 페이지에서 스크래핑한 대표 상품 이미지 — LLM이 지어내지 않고
-    # fetchers/danawa.py에서 파싱한 값만 흘러들어온다(danawa 출신 후보에만 채워짐).
+    # 상품 대표 이미지 - 원래 다나와 스크래핑(fetchers/danawa.py)에서만 채웠는데
+    # 다나와 파이프라인이 11번가 오픈 API로 교체되며 그 소스가 사라졌다. 필드는
+    # 호환을 위해 남겨두지만 지금은 아무 코드도 채우지 않는다(항상 None) -
+    # 11번가 API 응답에 이미지 필드가 있는지 확인 후 다시 연결이 필요하다.
     image_url: str | None = None
     reasoning: str | None = None
     error: str | None = None
@@ -40,12 +43,6 @@ class AgentCandidate(BaseModel):
     url: str | None = None
     image_url: str | None = None
     reasoning: str | None = None
-
-
-class AgentCandidates(BaseModel):
-    agent: AgentName
-    candidates: list[AgentCandidate] = []
-    error: str | None = None
 
 
 class RefinedQuery(BaseModel):
@@ -75,18 +72,21 @@ class Decision(BaseModel):
     price: str
     retailer: str
     url: str
+    # Proposal.image_url과 같은 이유로 지금은 항상 None(11번가 API 이미지 필드
+    # 재연결 전까지).
     image_url: str | None = None
     reasoning: str
     chosen_agent: AgentName
-    # "danawa_offer": app.price_table이 다나와 실측 가격표의 A등급(링크 생성
-    # 가능) offer와 대조해 price/url을 검증된 값으로 교체했다는 뜻.
+    # "danawa_offer": 과거(다나와 실측 가격표 시절) 저장된 기록 호환용 - 지금은
+    # 새로 만들지 않는다.
+    # "elevenst_offer": 11번가 오픈 API(ProductSearch) 응답을 그대로 썼다는
+    # 뜻 - 1st-party 구조화 데이터라 LLM 추정이 섞이지 않는다.
     # "llm_guess"(기본값): 그런 대조 없이 LLM이 제안한 값 그대로.
-    price_source: Literal["danawa_offer", "llm_guess"] = "llm_guess"
+    price_source: Literal["danawa_offer", "elevenst_offer", "llm_guess"] = "llm_guess"
     # 최종 선택된 후보가 DeepSeek challenge 검증을 통과했는지(Proposal.verified와
-    # 같은 의미) — judge 경로는 매칭된 proposal의 값을 그대로 물려받고, relaxed
-    # fallback 경로(2026-08-16 강화)는 별도로 challenge를 태워 채운다. None은
-    # "검증 자체가 안 됐거나 실패함"(다나와 실측처럼 애초에 challenge가 필요
-    # 없는 경우도 apply_challenge에서 True로 강제되므로 여기 None에는 안 걸림).
+    # 같은 의미). None은 "검증 자체가 안 됐거나 실패함"(구조화 데이터 실측처럼
+    # 애초에 challenge가 필요 없는 경우도 apply_challenge에서 True로 강제되므로
+    # 여기 None에는 안 걸림).
     verified: bool | None = None
 
 
@@ -104,19 +104,10 @@ class JudgeVerdict(BaseModel):
 
 class DecideRequest(BaseModel):
     query: str
-    brand: str | None = None
-    # Human-in-the-loop으로 브랜드/용량/개수를 이미 하나 골라 검색어에 이어붙여
-    # 재검색하는 요청이면 True — is_bulk_query()/needs_clarification() 같은
-    # "첫 질의가 애매한지" 판단용 휴리스틱을 건너뛴다. 이미 특정 상품을 좁혀가는
-    # 중인데, 예컨대 "80ml"처럼 용량이 붙은 재검색어가 새 대량구매 질의로
-    # 오판되는 걸 막기 위함.
-    skip_intent_check: bool = False
     # /decide/clarify 전용(app.debate.check_clarify_facets) - AI 상세검색을
-    # 여러 턴에 걸쳐 좁혀나갈 때(예: "핸드폰" -> "핸드폰 삼성전자") 매 라운드마다
-    # search.danawa.com을 새로 때리면 10초 Crawl-delay가 매번 붙어 느리다.
-    # base_query에 그 드릴다운의 맨 처음 검색어(이미 캐시됐을 가능성이 높다)를
-    # 넘기면, 백엔드가 그걸로 검색해 캐시를 재사용하고 나머지는 로컬 필터링만
-    # 한다 - 다른 엔드포인트는 이 필드를 무시한다.
+    # 여러 턴에 걸쳐 좁혀나갈 때(예: "핸드폰" -> "핸드폰 삼성전자") base_query에
+    # 그 드릴다운의 맨 처음 검색어를 넘기면, 백엔드가 그걸로 검색한 뒤 나머지는
+    # 로컬 필터링만 한다 - 다른 엔드포인트는 이 필드를 무시한다.
     base_query: str | None = None
     # /decide/clarify 전용(2026-08-15, 사용자 페르소나 기반 상품 매핑) - 로그인
     # 여부와 무관하게 "이번 세션에서 지금까지 고른 값들"을 {facet 라벨: 값}으로
@@ -142,6 +133,8 @@ class PriceTableOffer(BaseModel):
 
 
 class PriceTable(BaseModel):
+    # 과거(다나와 실측 가격표 시절) 저장된 기록 호환용 - 새 코드는 이 모델을
+    # 만들지 않는다(DecideResponse.price_table은 항상 None).
     source: str = "danawa"
     source_pcode: str | None = None
     product_name: str | None = None
@@ -248,15 +241,6 @@ class ClarifyResponse(BaseModel):
     mode: Literal["clarify"] = "clarify"
     query: str
     options: ClarifyOptions
-
-
-class ClarifyAskRequest(BaseModel):
-    query: str
-    options: list[str]
-
-
-class ClarifyAskResponse(BaseModel):
-    message: str
 
 
 class BrandPriceResponse(BaseModel):

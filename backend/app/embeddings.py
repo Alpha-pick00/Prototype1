@@ -1,25 +1,40 @@
+"""Qwen(DashScope) text-embedding-v3 기반 임베딩 유틸 - run_elevenst_only_debate의
+"관련 상품" 랭킹과 향후 시맨틱 캐시가 공유해서 쓴다. 실측(2026-08-20)으로
+text-embedding-v3(1024차원)만 이 계정 플랜에서 접근 가능함을 확인했다 -
+text-embedding-v1/v2는 각각 404/AccessDenied로 막혀 있다."""
+
+from __future__ import annotations
+
+import math
+
 from openai import AsyncOpenAI
 
 from .config import settings
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 512
+EMBEDDING_MODEL = "text-embedding-v3"
 
 
-async def embed_query(text: str) -> list[float]:
-    """검색 질의를 벡터로 변환한다 — search_cache.find_similar()가 의미 기반
-    캐시 매칭에 사용. 512차원으로 줄여 SQLite 저장량을 아낀다.
+def _client() -> AsyncOpenAI:
+    return AsyncOpenAI(api_key=settings.qwen_api_key, base_url=settings.qwen_api_base, max_retries=0)
 
-    max_retries=0(사용자 요청, 2026-08-15: "너무 느려 더 빠르게") - 호출부
-    (app.search.search)가 이미 실패 시 Tavily로 안전하게 폴백하므로, OpenAI SDK
-    기본 재시도(2회, 지수 백오프)는 살릴 이유가 없다. 크레딧 소진처럼 재시도해도
-    똑같이 실패할 오류(429 insufficient_quota)에 매 검색 호출마다 ~1.3초씩
-    허비하고 있었다 - 낭비될 뿐 아니라 실제 정상 응답이 와야 할 자리를 계속
-    지연시켰다."""
-    client = AsyncOpenAI(api_key=settings.openai_api_key, max_retries=0)
-    response = await client.embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=text,
-        dimensions=EMBEDDING_DIMENSIONS,
-    )
-    return response.data[0].embedding
+
+async def embed(texts: list[str]) -> list[list[float]] | None:
+    """실패(키 없음·API 오류)하면 None을 돌려준다 - 호출부는 임베딩 없이
+    원래 순서를 그대로 쓰는 폴백을 갖는다."""
+    if not texts or not settings.qwen_api_key:
+        return None
+    try:
+        client = _client()
+        response = await client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+        return [d.embedding for d in response.data]
+    except Exception:
+        return None
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)

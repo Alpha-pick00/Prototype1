@@ -8,7 +8,7 @@ import type {
   BrandOption,
   Proposal,
 } from '../lib/api';
-import { askClarifyQuestion, checkClarifyFacets } from '../lib/api';
+import { checkClarifyFacets } from '../lib/api';
 import { dedupeAppend } from '../context/SearchContext';
 
 const fadeUp = {
@@ -26,6 +26,8 @@ const AGENT_LABEL: Record<string, string> = {
   gpt: 'Qwen',
   groq: 'Groq',
   deepseek: 'DeepSeek',
+  danawa: '다나와',
+  elevenst: '11번가',
 };
 
 const Card = ({ children }: { children: React.ReactNode }) => (
@@ -48,6 +50,10 @@ const ResetLink = ({ onReset, label = '다시 검색' }: { onReset: () => void; 
   </button>
 );
 
+// 브랜드 단축 검색/대량구매 응답을 만드는 경로(run_brand_price, "bulk" 질의)는
+// 더 이상 새로 만들어지지 않지만(check_clarify_facets가 brands를 채우지 않음 -
+// 일반 facet 시스템으로 대체됨), 과거 저장된 히스토리(HistoryEntry)에는 이
+// 모드로 저장된 실제 기록이 있을 수 있어 그 표시 경로는 남겨둔다.
 const BrandOptionRow = ({ option }: { option: BrandOption }) => (
   <a
     href={option.url}
@@ -77,11 +83,7 @@ const BrandOptionRow = ({ option }: { option: BrandOption }) => (
 );
 
 const STAGE_LABEL: Record<DecideStage, string> = {
-  refining: '질의를 다듬고 있습니다',
-  searching: '다나와에서 검색하고 있습니다',
-  proposing: 'Qwen · Groq · DeepSeek가 후보를 찾고 있습니다',
-  challenging: 'DeepSeek가 근거를 검증하고 있습니다',
-  judging: 'Groq가 근거를 비교해 최종 추천을 고르고 있습니다',
+  searching: '11번가에서 검색하고 있습니다',
 };
 
 const ProposedByChips = ({ proposedBy }: { proposedBy: string[] | null | undefined }) =>
@@ -126,9 +128,9 @@ const CandidateProgressRow = ({ proposal }: { proposal: Proposal }) => (
   </div>
 );
 
-// AI 오케스트레이션(adk_pipeline: 정제→검색→제안→검증→심사) 진행 상태를 턴 안에서
-// 보여준다 - Hero.tsx가 turn.streamingStage/streamingProposals(SearchContext.runTurn이
-// decideStream 이벤트로 채운다)를 이 컴포넌트에 그대로 넘긴다.
+// 11번가 검색 진행 상태를 턴 안에서 보여준다 - Hero.tsx가
+// turn.streamingStage/streamingProposals(SearchContext.runTurn이 decideStream
+// 이벤트로 채운다)를 이 컴포넌트에 그대로 넘긴다.
 export const StreamingCard = ({ stage, proposals }: { stage: DecideStage; proposals: Proposal[] }) => (
   <Card>
     <div className="flex flex-col items-center text-center py-2 gap-6">
@@ -167,80 +169,22 @@ export const ErrorCard = ({
   </Card>
 );
 
-const OptionButton = ({ value, onClick }: { value: string; onClick: () => void }) => (
-  <button
-    onClick={onClick}
-    className="px-4 py-2 rounded-full border border-black/10 text-sm font-light hover:bg-neutral-950 hover:text-white hover:border-neutral-950 transition-all"
-  >
-    {value}
-  </button>
-);
-
-export type ClarifyStep = 'brand' | 'product' | 'volume' | 'quantity';
-
-const CLARIFY_STEP_ORDER: ClarifyStep[] = ['brand', 'product', 'volume', 'quantity'];
-
-// 고정 축(제품/용량/개수 - 브랜드는 아래에서 다나와 브랜드 최저가 단축 경로로
-// 따로 렌더된다) 하나를 실제 상담원처럼 자연스러운 질문 한 문장으로 물어보고
-// 버튼으로 답을 받는다. 채팅으로도 답할 수 있게 별도 입력창을 카드마다
-// 두었었는데, 화면 하단에 이미 검색창(GradientChatInput)이 있어 중복이라
-// 없앴다(사용자 요청, 2026-08-15) - 답은 버튼으로만 받는다.
-const FixedAxisClarifyCard = ({
-  query,
-  options,
-  onSelectOption,
-}: {
-  query: string;
-  options: string[];
-  onSelectOption: (value: string) => void;
-}) => {
-  const [question, setQuestion] = useState<string | null>(null);
-  const askedKeyRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    const key = options.join('|');
-    if (askedKeyRef.current === key) return;
-    askedKeyRef.current = key;
-    setQuestion(null);
-    askClarifyQuestion(query, options).then(setQuestion);
-  }, [query, options.join('|')]);
-
-  return (
-    <div>
-      {question && (
-        <div className="mb-3 inline-block max-w-[85%] rounded-[14px_14px_14px_4px] bg-black/[0.04] px-4 py-2.5 text-sm font-light text-neutral-700">
-          {question}
-        </div>
-      )}
-      <div className="flex flex-wrap gap-2">
-        {options.map((value) => (
-          <OptionButton key={value} value={value} onClick={() => onSelectOption(value)} />
-        ))}
-      </div>
-    </div>
-  );
-};
-
 interface Props {
   result: DecideResult;
   // 사용자 페르소나(2026-08-15) - 이번 세션에서 이미 고른 {facet 라벨: 값}.
   // 옵션 순서 자체는 백엔드가 이미 반영해 보내주므로, 여기서는 일치하는
   // 버튼에 "선호" 표시만 붙이는 시각적 용도로 쓴다.
   sessionPreferences?: Record<string, string>;
-  onSelectBrand: (brand: string) => void;
   // (사용자 페르소나, 2026-08-15) label -> 선택값 맵을 그대로 넘긴다 - 값
   // 배열만 받으면 SearchContext가 어느 facet 라벨에서 이 값을 골랐는지 몰라
   // 계정/세션 페르소나에 기록할 수 없다.
   onConfirmFacets: (selected: Record<string, string>) => void;
-  onSelectClarifyOption: (step: Exclude<ClarifyStep, 'brand'>, value: string) => void;
 }
 
 export const SearchResults = ({
   result,
   sessionPreferences = {},
-  onSelectBrand,
   onConfirmFacets,
-  onSelectClarifyOption,
 }: Props) => {
   // AI 상세검색: facet마다 하나씩 고른다. 예전엔 화면에 떠 있는 기준을 전부
   // 골라야만 검색이 실행됐는데(2026-08-13: "상세검색에서 고를때마다 검색하는걸로
@@ -265,7 +209,7 @@ export const SearchResults = ({
   // 반영해 좁혀줄 근거(options_by_selection)가 애초에 존재하지 않는다.
   // "검색어에 관련된 것"을 실제로 보여주려면 지어내지 않고 진짜로 그 결합
   // 검색어("핸드폰 샤오미")에 대해 다시 물어봐야 한다 - check_clarify_facets를
-  // base_query 없이 호출하면(캐시 재사용 최적화를 건너뛰어) 다나와를 그
+  // base_query 없이 호출하면(캐시 재사용 최적화를 건너뛰어) 11번가를 그
   // 결합 검색어로 실제로 다시 검색해서, 실제로 존재하는 샤오미 관련 facet
   // (기종·용량 등)을 새로 뽑아온다. liveFacets가 있으면 원래 facets 대신
   // 이걸 보여준다 - 라벨/구성이 달라질 수 있어 selectedFacets는 초기화한다.
@@ -391,32 +335,7 @@ export const SearchResults = ({
   }, [JSON.stringify(pendingFreeTextFacets), JSON.stringify(effectiveSelectedFacets), result.mode, result.query]);
 
   if (result.mode === 'clarify') {
-    const { brands, products, volumes, quantities } = result.options;
-    const hasAnyOptions =
-      brands.length > 0 ||
-      displayFacets.length > 0 ||
-      products.length > 0 ||
-      volumes.length > 0 ||
-      quantities.length > 0;
-
-    // 고정 축(제품/용량/개수) 중 이번 라운드에 물어볼 하나만 고른다 - 한 번에
-    // 다 보여주면 서로 다른 축이 뒤섞여 어떤 조합을 고르는 건지 애매해진다.
-    // 옵션이 2개 이상인("진짜 애매한") 축을 우선하고, 전부 1개뿐이면(폴백) 그중
-    // 아무거나로 진행할 수 있게 열어준다. 브랜드는 다나와 브랜드 최저가 단축
-    // 경로(onSelectBrand)로 이미 별도 렌더되므로 이 로테이션에서 제외한다.
-    // facets(AI 상세검색)와는 서로 다른 clarify 소스(check_clarify_facets/
-    // run_clarify)라 겹치지 않고 그대로 병행 노출된다.
-    const fixedOptionsByStep: Partial<Record<ClarifyStep, string[]>> = {
-      product: products,
-      volume: volumes,
-      quantity: quantities,
-    };
-    const fixedSteps = CLARIFY_STEP_ORDER.filter((s): s is Exclude<ClarifyStep, 'brand'> => s !== 'brand');
-    const step =
-      fixedSteps.find((s) => (fixedOptionsByStep[s]?.length ?? 0) > 1) ??
-      fixedSteps.find((s) => (fixedOptionsByStep[s]?.length ?? 0) > 0) ??
-      null;
-    const stepOptions = step ? fixedOptionsByStep[step] ?? [] : [];
+    const hasAnyOptions = displayFacets.length > 0;
 
     return (
       <Card>
@@ -446,19 +365,6 @@ export const SearchResults = ({
                   <X className="w-3.5 h-3.5" />
                 </button>
               </span>
-            ))}
-          </div>
-        )}
-        {brands.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-4 last:mb-0">
-            {brands.map((brand) => (
-              <button
-                key={brand}
-                onClick={() => onSelectBrand(brand)}
-                className="px-4 py-2 rounded-full border border-black/10 text-sm font-light hover:bg-neutral-950 hover:text-white hover:border-neutral-950 transition-all"
-              >
-                {brand}
-              </button>
             ))}
           </div>
         )}
@@ -531,10 +437,10 @@ export const SearchResults = ({
                     );
                   })
                 ) : query.trim() ? (
-                  // 2026-08-18(사용자 리포트: "다나와에는 아이폰 15랑 샤오미가
+                  // 2026-08-18(사용자 리포트: "11번가에는 아이폰 15랑 샤오미가
                   // 있어" - 목록에 없는 값을 찾으면 막다른 "일치하는 항목이
                   // 없어요"만 뜨고 검색할 방법이 없었다) - 백엔드가 미리 뽑아준
-                  // 옵션 목록은 그 순간 다나와 검색 결과 상위 몇 건에서 나온
+                  // 옵션 목록은 그 순간 11번가 검색 결과 상위 몇 건에서 나온
                   // 값일 뿐 전체 카탈로그가 아니다. 그 목록에 없다고 검색 자체를
                   // 막지 말고, 타이핑한 값을 그대로 이 facet의 선택값으로 써서
                   // 검색하게 한다.
@@ -562,19 +468,13 @@ export const SearchResults = ({
             </button>
           </div>
         )}
-        {step && (
-          <div className="mb-4 last:mb-0">
-            <FixedAxisClarifyCard
-              query={result.query}
-              options={stepOptions}
-              onSelectOption={(value) => onSelectClarifyOption(step, value)}
-            />
-          </div>
-        )}
       </Card>
     );
   }
 
+  // "bulk"/"brand_price" 모드는 더 이상 새로 만들어지지 않지만(위 BrandOptionRow
+  // 주석 참고), 과거 히스토리 항목을 열었을 때는 여전히 나올 수 있어 표시
+  // 경로를 남겨둔다.
   if (result.mode === 'brand_price') {
     if (result.error || !result.option) {
       return <ErrorCard message={result.error || '해당 브랜드 상품을 찾지 못했습니다.'} />;

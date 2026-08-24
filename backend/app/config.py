@@ -7,12 +7,6 @@ load_dotenv()
 
 
 class Settings:
-    # openai_api_key는 이제 embeddings.py(검색 캐시 의미 기반 매칭)에서만 쓴다 -
-    # "gpt" 에이전트 슬롯 자체는 2026-08-15부터 OpenAI 토큰 소진으로 Qwen(DashScope)
-    # 으로 옮겼다(agents/gpt.py 참고 - 파일/함수/agent="gpt" 식별자는 스키마·
-    # 프론트엔드·테스트 전반에 걸쳐 있어 그대로 두고, 내부에서 호출하는 모델만
-    # 바꿨다). 아래 qwen_api_key가 그 슬롯의 실제 자격증명이다.
-    openai_api_key: str | None = os.environ.get("OPENAI_API_KEY")
     qwen_api_key: str | None = os.environ.get("QWEN_API_KEY")
     # DashScope는 리전마다 별도 엔드포인트/계정이다 - 이전에 이 프로젝트가 Qwen을
     # 붙였다가 "Model Studio 계정의 과금 플랜 활성화 문제"로 포기한 적이 있는데
@@ -23,9 +17,9 @@ class Settings:
         "QWEN_API_BASE", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     )
     deepseek_api_key: str | None = os.environ.get("DEEPSEEK_API_KEY")
-    tavily_api_key: str | None = os.environ.get("TAVILY_API_KEY")
-    google_merchant_id: str | None = os.environ.get("GOOGLE_MERCHANT_ID")
-    google_service_account_file: str | None = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
+    # 11번가 오픈 API(openapi.11st.co.kr) 키 - 메인 검색 흐름(app.debate.
+    # run_elevenst_only_debate)과 AI 상세검색(check_clarify_facets)이 쓴다.
+    elevenst_api_key: str | None = os.environ.get("ELEVENST_API_KEY")
 
     # 2026-08-18("qwen 3.7 + 로 모델 바꿔줘") - qwen-max에서 Qwen3.7 세대의
     # plus 등급으로 교체. 필요하면 .env의 QWEN_MODEL로 다른 버전(예:
@@ -33,49 +27,28 @@ class Settings:
     qwen_model: str = os.environ.get("QWEN_MODEL", "qwen3.7-plus")
     deepseek_model: str = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
-    # "groq"/judge 슬롯은 2026-08-16부터 Groq(무료 API)이 담당한다(사용자 요청:
-    # "deepseek Qwen 빼고 싹 다 무료 모델로 바꾸려고 해" - Gemini는 프로젝트가
-    # 403으로 막혀있었고 Claude는 애초에 상시 무료 티어가 없다). Groq도 OpenAI
-    # 호환 엔드포인트라 gpt.py/deepseek.py와 같은 패턴(AsyncOpenAI+base_url)을
-    # 그대로 쓴다. agent 식별자는 원래 "gemini"였지만 2026-08-18("Gemini
-    # 이제 안쓰니까 이름 제대로 바꿔서 코드 반영해") 실제 쓰는 모델명을 따라
-    # "groq"로 리네임했다(gpt 슬롯과 달리 - Qwen으로 바뀐 뒤에도 "gpt" 식별자를
-    # 유지한 건 리네임 비용이 훨씬 컸기 때문).
+    # OCR 텍스트 정리(app/ocr/cleanup.py) 전용 - console.groq.com 무료 API 키.
     groq_api_key: str | None = os.environ.get("GROQ_API_KEY")
     groq_api_base: str = os.environ.get("GROQ_API_BASE", "https://api.groq.com/openai/v1")
-    # 카테고리분류/OCR 텍스트 정리/propose의 "groq" 슬롯이 공통으로 쓰는 범용
-    # 모델. 원래는 Groq 무료(on-demand) 티어의 분당 토큰(TPM) 한도가 가장 넉넉한
-    # llama-3.3-70b-versatile을 썼는데(검색 결과 12건을 그대로 프롬프트에 넣으면
-    # 이 한도를 매번 초과했다 - agents/base.py의 _SNIPPET_MAX_CHARS로 기본 해결),
-    # 2026-08-18 llama-3.3-70b-versatile이 Groq에서 완전히 내려가(계정
-    # /v1/models 조회에도 안 잡힘) 모든 호출이 404로 죽는 게 확인됐고("llama
-    # 모델 전부 GPT-oss 무료 모델로 바꿔줘") - 그라운딩 회귀 파일럿에서
-    # gpt-oss-20b(refine과 같은 모델)로 한 번 바꿨는데, 그러자 refine + propose +
-    # 카테고리분류 + OCR이 전부 gpt-oss-20b의 같은 20만 토큰/일 예산을 나눠 쓰게
-    # 돼 오히려 더 빨리(같은 파일럿의 43번째 케이스 근처) 소진됐다 - 바로 아래
-    # groq_refine_model과 겹치지 않게 gpt-oss-120b(judge와 공유)로 옮겼다.
-    # propose는 output_schema를 안 쓰므로(순수 JSON 배열 텍스트를 직접 파싱)
-    # 애초에 구조화 출력 지원 여부와 무관하게 아무 모델이나 쓸 수 있다 - judge와
-    # 공유하는 이 조합이 refine과 공유하는 것보다 실제로 더 나은지는 다음
-    # 파일럿으로 다시 확인해야 한다(judge는 후보가 1개면 스킵되지만 propose는
-    # 매 질의 항상 실행돼, 어느 쪽이 덜 부딪히는지는 아직 추정일 뿐 실측하지
-    # 않았다).
     groq_model: str = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
-    # refine은 프롬프트가 원본 질의 하나뿐이라 작지만, ADK가 output_schema를
-    # response_format=json_schema로 요청한다 - groq/compound-mini는 이를 지원하지
-    # 않는다("This model does not support response format json_schema"). 구조화
-    # 출력을 지원하는 gpt-oss 계열 중 작은 쪽을 refine 전용으로 따로 둔다.
-    groq_refine_model: str = os.environ.get("GROQ_REFINE_MODEL", "openai/gpt-oss-20b")
-    # judge(최종 심사)도 output_schema가 필요해 같은 gpt-oss 계열이지만, propose
-    # 쪽보다 큰 120b를 따로 써서 최소한의 판단력 격차를 둔다.
-    groq_judge_model: str = os.environ.get("GROQ_JUDGE_MODEL", "openai/gpt-oss-120b")
+
+    # 검색어 표기 변형 폴백(app/agents/hcx.py::generate_query_variants) 전용 -
+    # CLOVA Studio(clovastudio.ncloud.com)에서 발급하는 키. OpenAI 호환
+    # 엔드포인트를 그대로 쓴다(json_object response_format은 미지원 - 프롬프트
+    # 지시 + parse_json_object 정규식 파싱으로 대신한다).
+    hcx_api_key: str | None = os.environ.get("HCX_API_KEY")
+    hcx_api_base: str = os.environ.get("HCX_API_BASE", "https://clovastudio.stream.ntruss.com/v1/openai")
+    # HCX-DASH-002 - 표기 변형 제안은 단순 작업이라 가장 가벼운/빠른 등급으로
+    # 충분하다(gpt.py의 thinking mode 비활성화와 같은 "느리면 안 된다" 원칙).
+    hcx_model: str = os.environ.get("HCX_MODEL", "HCX-DASH-002")
 
     google_vision_api_key: str | None = os.environ.get("GOOGLE_VISION_API_KEY")
 
-    # 검색 캐시의 의미 기반(임베딩) 매칭 on/off. openai_api_key는 이제 이 임베딩
-    # 조회에서만 쓰이지만, 그것과 별개로 이 기능 자체만 끄고 싶을 때를 위한
-    # 스위치를 그대로 둔다.
-    semantic_cache_enabled: bool = os.environ.get("SEMANTIC_CACHE_ENABLED", "true").lower() != "false"
+    # LLM 응답 캐시(app/llm_cache.py) 저장소 - Supabase 프로젝트 URL + secret
+    # key(서버 쓰기용, RLS 우회). 둘 다 없으면 캐시가 안전하게 no-op(항상
+    # 미스)로 동작한다 - elevenst_api_key와 같은 패턴.
+    supabase_url: str | None = os.environ.get("SUPABASE_URL")
+    supabase_key: str | None = os.environ.get("SUPABASE_KEY")
 
     # 소셜 로그인 (Google Client ID는 프론트엔드 VITE_GOOGLE_CLIENT_ID로만 쓰임 —
     # access_token으로 유저 정보를 조회하는 방식이라 백엔드는 client id가 필요 없다)

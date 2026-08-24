@@ -20,9 +20,7 @@ export const Hero = () => {
     ocrBusy,
     sessionPreferences,
     sendMessage,
-    selectBrand,
     selectFacets,
-    selectClarifyOption,
     retryTurn,
     editTurn,
     handleImageUpload,
@@ -436,7 +434,7 @@ export const Hero = () => {
                       <div className="flex justify-start">
                         <div className="w-full group/assistant">
                           {turn.status === 'loading' && (
-                            <StreamingCard stage={turn.streamingStage || 'refining'} proposals={turn.streamingProposals} />
+                            <StreamingCard stage={turn.streamingStage || 'searching'} proposals={turn.streamingProposals} />
                           )}
                           {turn.status === 'error' && (
                             <ErrorCard
@@ -450,9 +448,7 @@ export const Hero = () => {
                               <SearchResults
                                 result={turn.result}
                                 sessionPreferences={sessionPreferences}
-                                onSelectBrand={(brand) => selectBrand(turn.id, brand)}
                                 onConfirmFacets={(selected) => selectFacets(turn.id, selected)}
-                                onSelectClarifyOption={(step, value) => selectClarifyOption(turn.id, step, value)}
                               />
                               <div className="mt-2 flex items-center gap-2 opacity-0 group-hover/assistant:opacity-100 transition-opacity">
                                 <span className="text-[11px] text-neutral-400 px-1">{formatTime(turn.createdAt)}</span>
