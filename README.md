@@ -24,7 +24,7 @@ alpha-pick-jet.vercel.app
 ```mermaid
 flowchart LR
     subgraph FE["Frontend · Vercel / GitHub Pages"]
-        GCI["GradientChatInput<br/>(대화형 입력, 사운드/애니메이션)"]
+        GCI["Hero<br/>(대화형 입력, 애니메이션)"]
         CTX["SearchContext.runTurn<br/>(턴 · 히스토리 · baseQuery 관리)"]
         SB["사이드바<br/>(기록 · 로그인)"]
     end
@@ -54,7 +54,7 @@ flowchart LR
     end
 
     subgraph EXT["외부 서비스"]
-        ELEVENST["11번가 오픈 API<br/>(ProductSearch · Categories)"]
+        ELEVENST["11번가 오픈 API<br/>(ProductSearch)"]
         QWEN["Qwen(DashScope)<br/>임베딩 · 추천 Agent"]
         HCX["HCX(HyperCLOVA X)<br/>검색어 표기 변형"]
         GROQ["Groq<br/>OCR 정제"]
@@ -100,7 +100,7 @@ flowchart LR
 | --- | --- |
 | Frontend | React 18, Vite 6, TypeScript, Tailwind CSS v4, Framer Motion(`motion`), React Router (HashRouter) |
 | Backend | FastAPI, Python, httpx, PyJWT |
-| 검색 | 11번가 오픈 API(ProductSearch · Categories) - 1st-party 구조화 데이터, 스크래핑 없음 |
+| 검색 | 11번가 오픈 API(ProductSearch) - 1st-party 구조화 데이터, 스크래핑 없음 |
 | 관련성 검증 | rapidfuzz 토큰 유사도 + 모델/규격 토큰 충돌 가드 + 상호배타 토큰 가드(`_product_name_matches`) - 검색어와 실제로 일치하는 상품만 후보로 인정 |
 | 추천 Agent | Qwen(DashScope) 임베딩(`text-embedding-v3`)으로 후보를 관련도순 정렬 → Qwen이 가격·리뷰·구매만족도를 종합해 최종 추천 선택(실패 시 최저가 규칙 기반 폴백) |
 | 검색어 표기 변형 | HCX(HyperCLOVA X, HCX-DASH-002) - 1차 검색이 관련 상품을 못 찾으면 카탈로그 표기 차이(예: "2프로"↔"이프로"↔"2%")를 추론해 대안 표기로 재검색 |
@@ -109,7 +109,7 @@ flowchart LR
 | 이미지 인식 | Google Cloud Vision (텍스트 추출) → Groq (정제 · 검색어 추출) |
 | 인증 | Google / Kakao / Naver OAuth2 + JWT 기반 세션 |
 | 저장소 | SQLite (검색 기록 · 자동완성 인덱스), Supabase(LLM 캐시, 선택적) |
-| 배포 | Docker, nginx, certbot, AWS GPU 인스턴스, nip.io(Backend) / GitHub Pages, Vercel(Frontend), GitHub Actions(CI) |
+| 배포 | Docker, nginx, certbot, AWS GPU 인스턴스, nip.io(Backend) / GitHub Pages, Vercel(Frontend), GitHub Actions(main 푸시 시 GitHub Pages 자동 배포 - 테스트 게이팅은 없음, `pytest`/`npm run build`는 수동 실행) |
 
 ### 주제 선정 배경
 
@@ -189,6 +189,7 @@ flowchart LR
 | 2026-08-19 | 취향 주도 카테고리(패션의류/잡화 등)에 스타일 가이드 응답 모드 추가(검증된 후보를 스타일별로 그룹핑) · 토큰 사용량 최적화(clarify facet 추출 가드, classify_category 모델 재배정) · 저장소 전반 죽은 코드/미사용 설정·의존성 정리(백엔드·프론트엔드) · README 정리 |
 | 2026-08-20 | **다나와 스크래핑 + Tavily 검색 + Google ADK 멀티에이전트 디베이트 파이프라인 전체 제거, 11번가 오픈 API(ProductSearch) 하나로 통일**(현재 아키텍처의 골격) · 추천 Agent 추가(Qwen 임베딩 관련도 랭킹 + LLM 최종 선택, 실패 시 최저가 폴백) · HITL을 쿼리 재구성 재검색 방식에서 구조적 로컬 필터링으로 재설계(카테고리 축은 11번가가 필터 미지원이라 되묻지 않음) · Supabase 기반 LLM 응답 캐시(KV+시맨틱) 스캐폴딩 · Qwen "thinking mode" 비활성화로 응답 지연 20~95초 → 2~5초 단축 · Groq 기반 검색어 표기 변형 폴백 추가("2프로"/"이프로"/"2%" 매핑) · GitHub 브랜치 보호 규칙 추가(main은 최소 1인 승인 필수) |
 | 2026-08-21 | 브랜드 단축검색/대량구매 생성 경로 + 고정 4축 clarify UI(`FixedAxisClarifyCard`) + 미사용 `skip_intent_check` 요청 필드 제거 · README 팀원 구성 절을 커밋 이력 기반 상세 기여 목록으로 확장(개인 포트폴리오용) · 검색어 표기 변형 폴백을 Groq에서 HCX(HyperCLOVA X, `HCX-DASH-002`)로 교체 |
+| 2026-08-24 | README 전면 재검증 - 코드와 실제로 다른 서술 발견해 정정: 프론트 `GradientChatInput`(실제로는 `Hero`) · 존재하지 않는 "사운드" 기능 서술 · 어디서도 호출 안 되는 죽은 `search_categories`/Categories API를 현재 데이터 소스처럼 서술하던 부분 · `scripts/grounding_regression.py`가 제거된 `debate.run_single_debate`를 호출해 실행하면 깨지는 상태(2026-08-20부터)라는 사실 미기재 · "GitHub Actions(CI)" 표기가 실제로는 테스트 게이팅 없는 배포 전용 워크플로였던 것 |
 
 ### 주요 의사결정 사항
 
@@ -262,7 +263,7 @@ flowchart LR
 ### 데이터 소스 및 탐색
 
 - **검색 데이터**: 11번가 오픈 API(ProductSearch)로 실시간 조회 - 1st-party 구조화 XML 응답(상품명 · 가격 · 판매자 · 리뷰 수 · 구매만족도 · 상세 URL이 필드로 분리돼 있어, 스크래핑처럼 스니펫에서 오파싱할 위험이 없음)
-- **카테고리 데이터**: 11번가 ProductSearch의 `option=Categories` 실측 카테고리 집계(AI 상세검색의 "카테고리" facet 후보 출처)
+- **카테고리 데이터**: `fetchers/elevenst.py`에 `option=Categories` 실측 카테고리 집계 조회 함수(`search_categories`)가 있지만, 2026-08-20 "카테고리 축은 아예 다루지 않는다" 결정 이후 실제로는 어디서도 호출되지 않는 죽은 코드다(`app/price_table.py::_search_elevenst_categories`도 정의만 있고 호출부가 없음 - `tests/test_clarify_facets.py`에 오히려 "호출되면 안 된다"는 회귀 테스트가 있음). AI 상세검색의 "카테고리" facet은 대신 DeepSeek이 상품명에서 자체적으로 뽑아온 걸 의도적으로 걸러낸다(`app.debate.check_clarify_facets`)
 - **이미지 데이터**: 사용자가 업로드한 상품 사진 → Google Cloud Vision으로 텍스트 추출
 
 ### 전처리(검색 결과 정제) 방법
@@ -505,6 +506,13 @@ sequenceDiagram
 "그라운딩 3종 강화" 참고)를 돌릴 때마다의 통과율 추이. "정답"은 사람이 매긴 가격/상품이 아니라
 구조적 검증(실제 구매 링크인지 · 그라운딩 검증 통과 여부 · 상품명 키워드 일치)만 자동 채점한다.
 
+> **현재 상태(2026-08-24 확인): 이 스크립트는 지금 실행하면 깨진다.** 다나와/ADK
+> 멀티에이전트 시절의 `debate.run_single_debate`를 직접 호출하는데, 2026-08-20
+> 재설계로 그 함수와 `adk_pipeline.py` 자체가 제거됐다 - 아래 표의 마지막 항목이
+> 2026-08-18에 멈춰있는 이유이기도 하다(그 이후로 파이프라인이 바뀌면서 자동
+> 갱신이 조용히 끊김). 지금 구조(`run_elevenst_only_debate`)에 맞게 다시 짜기
+> 전까지는 아래 표/그래프를 과거 회귀 기록으로만 보고, 새로 값을 추가하려 하지 말 것.
+
 <!-- GROUNDING_HISTORY_START -->
 실행할 때마다 이 표/그래프가 자동으로 갱신된다(`scripts/grounding_regression.py`가
 `scripts/grounding_regression_history.json`에 결과를 추가하고 이 구간을 재생성한다 -
@@ -532,7 +540,7 @@ xychart-beta
 
 ### 코드 정리 및 GitHub 관리
 
-- 기능 단위 브랜치 → PR → 리뷰(빌드/타입체크) → merge 워크플로를 일관되게 적용 (PR #1~#28)
+- 기능 단위 브랜치 → PR → 리뷰 → merge 워크플로를 프로젝트 전 기간(PR #1~#54)에 걸쳐 적용 - 2026-08-21부터는 GitHub 브랜치 보호 규칙 + Repository Ruleset으로 main에 최소 1인 승인을 강제(일반적인 관리자 강제 머지로도 우회 안 됨 - 룰셋 자체를 임시로 꺼야만 가능)
 - 병합 완료된 브랜치는 주기적으로 감사(merge-base 확인) 후 정리해 브랜치 목록을 최신 상태로 유지
 - `.env`, SQLite 데이터 파일(`autocomplete.db`, `history.db`) 등 비밀/로컬 데이터는 `.gitignore`로 관리
 
@@ -544,3 +552,4 @@ xychart-beta
 - 11번가 오픈 API가 카테고리 코드 필터를 지원하지 않아(dispCtgrNo를 줘도 결과가 안 바뀜을 실측 확인), AI 상세검색의 카테고리 축은 사용자에게 되묻지 않고 표본을 좁히는 데도 안 씀 - 다른 축(브랜드/모델/용량)만으로 좁혀나감
 - Supabase 기반 LLM 응답 캐시(`app/llm_cache.py`)는 스키마(`supabase/llm_cache.sql`)와 코드는 준비돼 있지만 실제 프로젝트 secret key가 아직 없어 비활성 상태(no-op) - 연결하면 별도 배포 작업 없이 바로 켜짐
 - HCX 검색어 표기 변형 재검색(`app/agents/hcx.py::generate_query_variants`)은 1차 검색 실패 시에만 타는 폴백이라 평소 검색 속도에는 영향 없지만, 그 경로 자체는 추가 LLM 호출 + 재검색으로 몇 초 더 걸림
+- `scripts/grounding_regression.py`가 다나와/ADK 시절 함수(`debate.run_single_debate`)를 호출해 지금은 실행하면 바로 깨짐(2026-08-20 재설계로 그 함수 자체가 제거됨) - [그라운딩 회귀 실험 기록](#그라운딩-회귀-실험-기록)의 자동 갱신도 그때부터 멈춰있다. 현재 파이프라인(`run_elevenst_only_debate`) 기준으로 다시 작성하는 게 후속 과제
