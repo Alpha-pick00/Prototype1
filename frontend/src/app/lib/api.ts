@@ -8,6 +8,9 @@ export interface Proposal {
   price: string | null;
   retailer: string | null;
   url: string | null;
+  // 다나와 실측 페이지에서 스크래핑한 대표 상품 이미지 - danawa 출신 후보에만
+  // 채워진다(LLM이 지어낸 값이 아님).
+  image_url?: string | null;
   reasoning: string | null;
   error: string | null;
   verified?: boolean | null;
@@ -20,6 +23,7 @@ export interface Decision {
   price: string;
   retailer: string;
   url: string;
+  image_url?: string | null;
   reasoning: string;
   chosen_agent: AgentName;
 }

@@ -293,6 +293,7 @@ class _DanawaFetchNode(BaseAgent):
                                 price_krw=offer["price_krw"],
                                 retailer=offer["seller"],
                                 url=resolved_url,
+                                image_url=primary_table.image_url,
                             )
                             danawa_raw = json.dumps([candidate.model_dump()])
         except Exception:
@@ -387,8 +388,14 @@ async def _resolve_comparison_page_item(
     resolved = await price_table_module.resolve_danawa_comparison_url(url, danawa_tables)
     if resolved is None:
         return item
-    resolved_url, price_krw, retailer = resolved
-    return {**item, "url": resolved_url, "price_krw": price_krw, "retailer": retailer}
+    resolved_url, price_krw, retailer, image_url = resolved
+    return {
+        **item,
+        "url": resolved_url,
+        "price_krw": price_krw,
+        "retailer": retailer,
+        "image_url": image_url or item.get("image_url"),
+    }
 
 
 async def _merge_proposals(
@@ -581,6 +588,7 @@ def _apply_challenge(
                 price=_format_price_krw(price_krw),
                 retailer=candidate.get("retailer"),
                 url=candidate.get("url"),
+                image_url=candidate.get("image_url"),
                 reasoning=" / ".join(reasons) if reasons else None,
                 verified=verified,
                 challenge_note=challenge_note,
@@ -908,6 +916,7 @@ def _build_decision(state: dict, proposals: list[Proposal]) -> Decision | None:
         price=matched.price or raw.get("price") or "",
         retailer=matched.retailer or raw.get("retailer") or "",
         url=matched.url or raw.get("url") or "",
+        image_url=matched.image_url,
         reasoning=raw.get("reasoning") or "",
         chosen_agent=matched.agent,
         verified=matched.verified,
@@ -1124,6 +1133,7 @@ async def _comparison_page_listing_fallback(
             price=_format_price_krw(cheapest.price_krw),
             retailer="다나와 가격비교",
             url=f"https://prod.danawa.com/info/?pcode={price_table.source_pcode}",
+            image_url=price_table.image_url,
             reasoning=(
                 "AI 제안 중 직접 검증된 구매 후보가 없어, 다나와가 실측한 가격비교 데이터를 "
                 f"대신 안내합니다 - {cheapest.seller} 등 {len(price_table.offers)}개 판매처의 "

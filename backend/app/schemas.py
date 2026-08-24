@@ -23,6 +23,9 @@ class Proposal(BaseModel):
     price: str | None = None
     retailer: str | None = None
     url: str | None = None
+    # 다나와 실측 페이지에서 스크래핑한 대표 상품 이미지 — LLM이 지어내지 않고
+    # fetchers/danawa.py에서 파싱한 값만 흘러들어온다(danawa 출신 후보에만 채워짐).
+    image_url: str | None = None
     reasoning: str | None = None
     error: str | None = None
     verified: bool | None = None
@@ -35,6 +38,7 @@ class AgentCandidate(BaseModel):
     price_krw: int | None = None
     retailer: str | None = None
     url: str | None = None
+    image_url: str | None = None
     reasoning: str | None = None
 
 
@@ -71,6 +75,7 @@ class Decision(BaseModel):
     price: str
     retailer: str
     url: str
+    image_url: str | None = None
     reasoning: str
     chosen_agent: AgentName
     # "danawa_offer": app.price_table이 다나와 실측 가격표의 A등급(링크 생성
@@ -140,6 +145,7 @@ class PriceTable(BaseModel):
     source: str = "danawa"
     source_pcode: str | None = None
     product_name: str | None = None
+    image_url: str | None = None
     offers: list[PriceTableOffer]
     spread: float | None = None
     # B-3a 실측: 다나와 상세페이지는 판매처 최대 10개만 정적 HTML에 노출한다.

@@ -662,9 +662,22 @@ export const SearchResults = ({
         rel="noopener noreferrer"
         className="group flex items-start justify-between gap-4 mb-3"
       >
-        <div className="min-w-0">
-          <p className="text-lg font-medium text-neutral-950">{displayed.product_name}</p>
-          <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
+        <div className="flex items-start gap-3 min-w-0">
+          {displayed.image_url && (
+            <img
+              src={displayed.image_url}
+              alt={displayed.product_name ?? ''}
+              className="w-16 h-16 shrink-0 rounded-lg object-cover border border-black/5 bg-white"
+              loading="lazy"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none';
+              }}
+            />
+          )}
+          <div className="min-w-0">
+            <p className="text-lg font-medium text-neutral-950">{displayed.product_name}</p>
+            <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
+          </div>
         </div>
         <div className="shrink-0 flex items-center gap-2">
           <span className="text-xl font-medium text-neutral-950 whitespace-nowrap">

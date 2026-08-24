@@ -170,6 +170,7 @@ def build_price_table(result: danawa.DanawaResult) -> PriceTable | None:
     return PriceTable(
         source_pcode=pcode,
         product_name=result["product_name"],
+        image_url=result.get("image_url"),
         offers=graded,
         spread=spread,
         total_mall_count=result["total_mall_count"],
@@ -571,6 +572,7 @@ async def enrich_decision(decision: Decision, raw_result: danawa.DanawaResult) -
     decision.price = f"{offer['price_krw']:,}원"
     decision.retailer = offer["seller"]
     decision.url = resolved_url
+    decision.image_url = raw_result.get("image_url") or decision.image_url
     decision.price_source = "danawa_offer"
     return decision
 
@@ -586,12 +588,12 @@ def _find_table_by_pcode(
 
 async def resolve_danawa_comparison_url(
     url: str, tables: list[tuple[PriceTable, danawa.DanawaResult]]
-) -> tuple[str, int, str] | None:
+) -> tuple[str, int, str, str | None] | None:
     """다나와 가격비교 페이지 URL(prod.danawa.com/info?pcode=...)을 pcode
     일치로 이미 페치된 A등급(링크 검증됨) 최저가 오퍼로 해석한다
-    (resolved_url, price_krw, retailer) - pcode 불일치·A등급 오퍼 없음 등으로
-    해석 실패하면 None(호출부는 이 경우 원래 URL을 그대로 쓰거나 후보 자체를
-    버려야 한다 - 안 검증된 값을 지어내지 않기 위함).
+    (resolved_url, price_krw, retailer, image_url) - pcode 불일치·A등급 오퍼
+    없음 등으로 해석 실패하면 None(호출부는 이 경우 원래 URL을 그대로 쓰거나
+    후보 자체를 버려야 한다 - 안 검증된 값을 지어내지 않기 위함).
 
     원래 exclude_price_comparison_site_as_final_pick 안에만 있던 로직을 뽑아냈다
     (2026-08-18) - propose 단계 병합(_merge_proposals)에서도 같은 해석이
@@ -612,7 +614,7 @@ async def resolve_danawa_comparison_url(
     resolved_url = await resolve_purchase_url(offer)
     if resolved_url is None:
         return None
-    return resolved_url, offer["price_krw"], offer["seller"]
+    return resolved_url, offer["price_krw"], offer["seller"], raw_result.get("image_url")
 
 
 async def exclude_price_comparison_site_as_final_pick(
@@ -636,10 +638,11 @@ async def exclude_price_comparison_site_as_final_pick(
     if _is_danawa_domain(decision.url):
         resolved = await resolve_danawa_comparison_url(decision.url, tables)
         if resolved is not None:
-            resolved_url, price_krw, retailer = resolved
+            resolved_url, price_krw, retailer, image_url = resolved
             decision.price = f"{price_krw:,}원"
             decision.retailer = retailer
             decision.url = resolved_url
+            decision.image_url = image_url or decision.image_url
             decision.price_source = "danawa_offer"
             return decision
 
@@ -652,6 +655,7 @@ async def exclude_price_comparison_site_as_final_pick(
         decision.price = proposal.price or decision.price
         decision.retailer = proposal.retailer or decision.retailer
         decision.url = proposal.url
+        decision.image_url = proposal.image_url or decision.image_url
         decision.reasoning = proposal.reasoning or decision.reasoning
         return decision
 

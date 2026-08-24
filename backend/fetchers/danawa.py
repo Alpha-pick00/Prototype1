@@ -84,6 +84,7 @@ class DanawaOffer(TypedDict):
 class DanawaResult(TypedDict):
     source_url: str
     product_name: str | None
+    image_url: str | None
     offers: list[DanawaOffer]
     fetched_at: str
     parse_status: str  # "ok" | "expired" | "partial" | "failed"
@@ -134,6 +135,20 @@ def _product_name(soup: BeautifulSoup) -> str | None:
         if text:
             return text
     return None
+
+
+def _image_url(soup: BeautifulSoup) -> str | None:
+    """_product_name()과 같은 대표 이미지(id="baseImage")의 src를 뽑는다 —
+    프로토콜 상대 경로(//img.danawa.com/...)로 오는 경우가 있어 https:를 붙인다."""
+    img = soup.select_one('img[alt$="_이미지"]') or soup.select_one("#baseImage")
+    if img is None:
+        return None
+    src = (img.get("src") or "").strip()
+    if not src:
+        return None
+    if src.startswith("//"):
+        return f"https:{src}"
+    return src
 
 
 def _seller_from_li(li) -> tuple[str, str] | None:
@@ -215,6 +230,7 @@ def parse_danawa_html(source_url: str, html: str, fetched_at: str | None = None)
         return {
             "source_url": source_url,
             "product_name": None,
+            "image_url": None,
             "offers": [],
             "fetched_at": fetched_at,
             "parse_status": "expired",
@@ -225,6 +241,7 @@ def parse_danawa_html(source_url: str, html: str, fetched_at: str | None = None)
 
     soup = BeautifulSoup(html, "lxml")
     product_name = _product_name(soup)
+    image_url = _image_url(soup)
 
     mall_list = soup.select_one("ul.list__mall-price")
     raw_items = mall_list.select("li.list-item") if mall_list is not None else []
@@ -245,6 +262,7 @@ def parse_danawa_html(source_url: str, html: str, fetched_at: str | None = None)
     return {
         "source_url": source_url,
         "product_name": product_name,
+        "image_url": image_url,
         "offers": offers,
         "fetched_at": fetched_at,
         "parse_status": status,
@@ -258,6 +276,7 @@ def _failed_result(source_url: str) -> DanawaResult:
     return {
         "source_url": source_url,
         "product_name": None,
+        "image_url": None,
         "offers": [],
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "parse_status": "failed",
