@@ -132,14 +132,18 @@ const ProductThumbnail = ({
   rank?: number;
 }) => {
   const [errored, setErrored] = useState(false);
-  const dim = size === 'sm' ? 'w-12 h-12' : 'w-16 h-16';
+  // 2026-08-24 사용자 요청("사진 크기만 더 크게") - md 96px -> 128px,
+  // sm 64px -> 96px.
+  const dim = size === 'sm' ? 'w-24 h-24' : 'w-32 h-32';
+  const badgeDim = size === 'sm' ? 'w-6 h-6 text-xs' : 'w-7 h-7 text-sm';
+  const iconDim = size === 'sm' ? 'w-5 h-5' : 'w-7 h-7';
 
   const rankBadge =
     rank != null ? (
       <span
-        className={`absolute -top-1.5 -left-1.5 flex items-center justify-center rounded-full text-[10px] font-medium ${
+        className={`absolute -top-1.5 -left-1.5 flex items-center justify-center rounded-full font-medium ${
           rank === 1 ? 'bg-neutral-950 text-white' : 'bg-white text-neutral-600 border border-black/10'
-        } w-5 h-5 shadow-sm`}
+        } ${badgeDim} shadow-sm`}
       >
         {rank}
       </span>
@@ -148,7 +152,7 @@ const ProductThumbnail = ({
   if (!src || errored) {
     return (
       <div className={`relative shrink-0 ${dim} rounded-lg bg-black/5 flex items-center justify-center`}>
-        <ImageOff className="w-4 h-4 text-neutral-300" />
+        <ImageOff className={`${iconDim} text-neutral-300`} />
         {rankBadge}
       </div>
     );
@@ -648,25 +652,26 @@ export const SearchResults = ({
 
   return (
     <Card>
-      <div className="flex items-center justify-between mb-4">
-        <span className="text-xs font-mono uppercase tracking-widest text-neutral-400">
-          {isAlternate ? `다른 후보 · ${headerLabel}` : `최종 추천 · ${headerLabel}`}
-        </span>
-        {isAlternate && (
+      <div className="flex items-center mb-4">
+        {isAlternate ? (
           <button
             type="button"
             onClick={() => setSelectedProposalUrl(null)}
             className="text-xs font-mono uppercase tracking-widest text-neutral-400 hover:text-neutral-950 transition-colors"
           >
-            AI 추천으로
+            AI추천
           </button>
+        ) : (
+          <span className="text-xs font-mono uppercase tracking-widest text-neutral-400">
+            최종 추천 · {headerLabel}
+          </span>
         )}
       </div>
       <a
         href={displayed.url ?? undefined}
         target="_blank"
         rel="noopener noreferrer"
-        className="group flex items-start justify-between gap-4 mb-3"
+        className="group flex items-start justify-between gap-4 mb-6"
       >
         <div className="flex items-start gap-3 min-w-0">
           <ProductThumbnail
@@ -678,6 +683,7 @@ export const SearchResults = ({
           <div className="min-w-0">
             <p className="text-lg font-medium text-neutral-950">{displayed.product_name}</p>
             <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
+            <p className="mt-1.5 text-sm font-light text-neutral-600 leading-relaxed break-keep">{displayed.reasoning}</p>
           </div>
         </div>
         <div className="shrink-0 flex items-center gap-2">
@@ -687,7 +693,6 @@ export const SearchResults = ({
           <ArrowUpRight className="w-5 h-5 text-neutral-300 group-hover:text-neutral-950 transition-colors" />
         </div>
       </a>
-      <p className="text-sm font-light text-neutral-600 leading-relaxed mb-6">{displayed.reasoning}</p>
 
       {/* 취향 주도 카테고리(패션의류/잡화 등)에서만 채워진다 - GPT 쇼핑의
           스타일 가이드 벤치마킹(2026-08-19). 그룹의 상품명/가격/판매처는
@@ -747,7 +752,7 @@ export const SearchResults = ({
             <span className="text-[11px] font-mono uppercase tracking-widest text-neutral-400 block mb-2">
               다른 후보
             </span>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {otherProposals.map((p, i) => {
                 const isPickable = !p.error && !!p.url && !!p.product_name;
                 return (
@@ -762,7 +767,7 @@ export const SearchResults = ({
                     // 버그 리포트 - "다른 후보 보고 1번으로 돌아가면 요약본으로
                     // 뜬다").
                     onClick={() => isPickable && setSelectedProposalUrl(p.url === decision.url ? null : p.url)}
-                    className={`flex items-start gap-2 text-xs text-left rounded-lg -mx-2 px-2 py-1.5 transition-colors ${
+                    className={`flex items-start gap-3 text-sm text-left rounded-lg -mx-2 px-3 py-2.5 transition-colors ${
                       isPickable ? 'hover:bg-black/[0.03] cursor-pointer' : 'cursor-default'
                     }`}
                   >
@@ -778,7 +783,7 @@ export const SearchResults = ({
                         {p.error ? p.error : `${p.product_name} · ${p.price || '가격 미확인'}`}
                       </p>
                       {!p.error && p.reasoning && (
-                        <p className="mt-0.5 font-light text-neutral-400 leading-snug line-clamp-2">
+                        <p className="mt-0.5 text-xs font-light text-neutral-400 leading-snug line-clamp-2 break-keep">
                           {p.reasoning}
                         </p>
                       )}
