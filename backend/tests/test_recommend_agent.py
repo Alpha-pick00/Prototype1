@@ -118,6 +118,34 @@ def test_run_elevenst_only_debate_uses_recommend_agent_pick_over_cheapest(monkey
     assert len(result.proposals) == 2
 
 
+def test_run_elevenst_only_debate_drops_reasoning_that_leaks_internal_index(monkeypatch):
+    """추천 Agent 프롬프트가 후보를 "[0] 상품명 / ..."처럼 번호 매겨 보여주는데,
+    LLM이 그 내부 순번을 그대로 reasoning에 써버리면(실측: "index 14", "(0, 1)")
+    사용자는 본 적 없는 번호라 무슨 뜻인지 모른다 - 그런 reasoning은 버리고
+    일반 문구로 대체해야 한다."""
+
+    async def _fake_search(query, limit=10):
+        return [_item("찾는 상품 A", 1000, "1"), _item("찾는 상품 B", 2000, "2")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
+
+    async def _fake_embed(texts):
+        return None
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _fake_recommend(query, candidates):
+        return 1, "index 1의 상품이 다른 후보(0)보다 리뷰가 많아서 선택함"
+
+    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+
+    result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
+
+    assert "index" not in result.decision.reasoning.lower()
+    assert result.decision.reasoning == "11번가 실측 검증 후보 중 추천 Agent(Qwen)가 선택"
+
+
 def test_run_elevenst_only_debate_propagates_image_url_to_decision_and_proposals(monkeypatch):
     """카드 UI가 쓸 image_url이 ElevenstSearchItem -> Decision/Proposal까지
     끊기지 않고 전달되는지 확인한다."""

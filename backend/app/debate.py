@@ -85,6 +85,13 @@ async def _search_with_query_variants(query: str) -> list[elevenst.ElevenstSearc
     return []
 
 
+# gpt.recommend_best()가 후보를 "[0] 상품명 / ..."처럼 번호 매겨 LLM에 보여주는데,
+# 프롬프트로 "이 번호를 사용자에게 노출하지 말라"고 지시해도(agents/base.py의
+# RECOMMEND_INSTRUCTIONS) 가끔 LLM이 그대로 새어나오게 쓴다(실측: "index 14",
+# "골프 티꽂이(0, 1)") - 사용자는 그 내부 순번을 본 적이 없어 무슨 뜻인지 모른다.
+_REASONING_LEAKS_INTERNAL_INDEX_RE = re.compile(r"\bindex\b|\[\d+\]", re.IGNORECASE)
+
+
 async def run_elevenst_only_debate(
     query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
 ) -> DecideResponse:
@@ -123,6 +130,13 @@ async def run_elevenst_only_debate(
     if recommended is not None:
         index, llm_reasoning = recommended
         best = ranked[index]
+        # 프롬프트로 "내부 목록 번호를 언급하지 말라"고 지시해도(RECOMMEND_INSTRUCTIONS)
+        # DeepSeek/Qwen류 모델은 프롬프트 지시를 놓칠 때가 있다(이 코드베이스에서
+        # 반복 관측된 패턴, 예: _drop_category_facet) - "index 14", "[0], [1]"처럼
+        # 사용자가 본 적 없는 내부 순번이 새어나가면 아예 그 reasoning을 버리고
+        # 일반 문구로 대체한다(잘못된 문구를 사용자에게 보여주는 것보다 안전).
+        if _REASONING_LEAKS_INTERNAL_INDEX_RE.search(llm_reasoning):
+            llm_reasoning = ""
         reasoning = (
             f"11번가 실측 검증 후보 중 추천 Agent(Qwen)가 선택 - {llm_reasoning}"
             if llm_reasoning
