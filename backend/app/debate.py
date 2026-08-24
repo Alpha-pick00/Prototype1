@@ -92,34 +92,12 @@ async def _search_with_query_variants(query: str) -> list[elevenst.ElevenstSearc
 _REASONING_LEAKS_INTERNAL_INDEX_RE = re.compile(r"\bindex\b|\[\d+\]", re.IGNORECASE)
 
 
-async def run_elevenst_only_debate(
-    query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
-) -> DecideResponse:
-    """11번가 오픈 API(ProductSearch)로 검색한다(_search_candidates - base_query가
-    있으면 재검색 대신 구조적 필터링). _product_name_matches로 질의와 실제로
-    맞는 상품만 후보(검증된 후보군)로 남기고, Qwen 임베딩으로 관련도순
-    정렬한 뒤(_rank_by_relevance) 그 순서 그대로 proposals에 담아 "관련 상품"
-    목록으로 노출한다. 최종 추천은 추천 Agent(gpt.recommend_best, 가격뿐
-    아니라 리뷰·구매만족도까지 고려)가 고르고, 실패하면(키 없음·API 오류)
-    최저가 규칙 기반으로 폴백한다. 관련 상품을 하나도 못 찾으면 Groq이
-    제안한 대안 표기로 재검색한다(_search_with_query_variants).
-
-    proposals 각각의 이유(reasoning)는 gpt.candidate_notes()가 별도로 채운다
-    (2026-08-24 사용자 요청 - "후보 추천해주는 애들도 추천하는 이유가 있으면
-    좋겠다"). recommend_best와 한 호출에 합쳤더니 출력 토큰이 늘어 평균
-    3.2초 -> 10.3초로 느려졌던 걸(직접 실측) recommend_best와 asyncio.gather로
-    동시에 실행되는 별도 호출로 분리해 완화했다 - 실패하거나 특정 index에
-    이유가 없으면 일반 문구로 안전하게 대체한다.
-
-    facet_answers가 있으면(다중 선택) _product_name_matches 재검사를 건너뛴다
-    (2026-08-24 버그 리포트, "카테고리를 여러개 고르면 그중에 하나라도
-    포함되어 있으면 검색 결과를 가지고 올 수 있게 해야해") - _search_candidates가
-    이미 _filter_items_by_facet_answers로 관련성을 구조적으로 보장했는데,
-    같은 facet에서 고른 값 여러 개(예: "갤럭시S25", "갤럭시S26")가 한 query
-    문자열에 다 들어가면 spec_match.model_or_quantity_conflict가 "같은
-    family(갤럭시S#)의 값 집합이 다르다"고 오판해 둘 중 하나만 있는 상품을
-    전부 걸러내 버렸다(실측 확인) - OR로 고른 걸 사실상 AND로 요구하는
-    버그였다."""
+async def _search_and_rank_candidates(
+    query: str, base_query: str | None, facet_answers: dict[str, list[str]] | None
+) -> list[elevenst.ElevenstSearchItem]:
+    """검색 -> 관련성 필터 -> (0건이면 대안 표기 재검색) -> 관련도순 정렬까지,
+    run_elevenst_only_debate()와 그 스트리밍 버전이 공유하는 앞부분이다.
+    관련 상품을 하나도 못 찾으면 RuntimeError."""
     items = await _search_candidates(query, base_query, facet_answers)
     relevant = (
         items
@@ -130,16 +108,14 @@ async def run_elevenst_only_debate(
         relevant = await _search_with_query_variants(query)
     if not relevant:
         raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했다.")
+    return await _rank_by_relevance(query, relevant)
 
-    ranked = await _rank_by_relevance(query, relevant)
 
-    # recommend_best(메인 선택)와 candidate_notes(다른 후보 각각의 이유)는
-    # 서로 의존하지 않는 별개 작업이라 동시에 실행한다 - 순서대로 부르면
-    # 두 호출 시간이 그대로 합산된다.
-    recommended, notes = await asyncio.gather(
-        gpt.recommend_best(query, ranked),
-        gpt.candidate_notes(query, ranked),
-    )
+def _build_decision(
+    ranked: list[elevenst.ElevenstSearchItem], recommended: tuple[int, str] | None
+) -> Decision:
+    """추천 Agent(gpt.recommend_best) 결과로 최종 추천(Decision)을 만든다.
+    실패하면(키 없음·API 오류) 최저가 규칙 기반으로 폴백한다."""
     if recommended is not None:
         index, llm_reasoning = recommended
         best = ranked[index]
@@ -159,7 +135,7 @@ async def run_elevenst_only_debate(
         best = min(ranked, key=lambda it: it["price_krw"])
         reasoning = "11번가 오픈 API(ProductSearch) 실측 - 추천 Agent 응답 실패로 최저가 규칙 기반 선택"
 
-    decision = Decision(
+    return Decision(
         product_name=best["product_name"],
         price=f"{best['price_krw']:,}원",
         retailer=best["seller"],
@@ -169,7 +145,17 @@ async def run_elevenst_only_debate(
         price_source="elevenst_offer",
         image_url=best.get("image_url"),
     )
-    fallback_note = "11번가 오픈 API 검증 결과 (관련도순 - 함께 볼만한 상품)"
+
+
+_FALLBACK_PROPOSAL_NOTE = "11번가 오픈 API 검증 결과 (관련도순 - 함께 볼만한 상품)"
+
+
+def _build_proposals(ranked: list[elevenst.ElevenstSearchItem], notes: dict[int, str]) -> list[Proposal]:
+    """notes(gpt.candidate_notes 결과, 없으면 빈 dict)로 "다른 후보" 각각의
+    이유를 채운다. 스트리밍 경로는 이 함수를 두 번 부른다 - 처음엔 notes={}로
+    불러 일반 문구로 즉시 final을 내보내고, candidate_notes가 끝나면 실제
+    notes로 다시 불러 notes 이벤트로 갱신한다(2026-08-24, "메인 추천이
+    끝나는 대로 먼저 보여주고 다른 후보 이유는 나중에 채워 넣기")."""
     proposals = []
     for i, it in enumerate(ranked):
         note = notes.get(i, "")
@@ -182,11 +168,53 @@ async def run_elevenst_only_debate(
                 price=f"{it['price_krw']:,}원",
                 retailer=it["seller"],
                 url=it["url"],
-                reasoning=note or fallback_note,
+                reasoning=note or _FALLBACK_PROPOSAL_NOTE,
                 verified=True,
                 image_url=it.get("image_url"),
             )
         )
+    return proposals
+
+
+async def run_elevenst_only_debate(
+    query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
+) -> DecideResponse:
+    """11번가 오픈 API(ProductSearch)로 검색한다(_search_candidates - base_query가
+    있으면 재검색 대신 구조적 필터링). _product_name_matches로 질의와 실제로
+    맞는 상품만 후보(검증된 후보군)로 남기고, Qwen 임베딩으로 관련도순
+    정렬한 뒤(_rank_by_relevance) 그 순서 그대로 proposals에 담아 "관련 상품"
+    목록으로 노출한다. 최종 추천은 추천 Agent(gpt.recommend_best, 가격뿐
+    아니라 리뷰·구매만족도까지 고려)가 고르고, 실패하면(키 없음·API 오류)
+    최저가 규칙 기반으로 폴백한다. 관련 상품을 하나도 못 찾으면 Groq이
+    제안한 대안 표기로 재검색한다(_search_with_query_variants).
+
+    proposals 각각의 이유(reasoning)는 gpt.candidate_notes()가 별도로 채운다
+    (2026-08-24 사용자 요청 - "후보 추천해주는 애들도 추천하는 이유가 있으면
+    좋겠다"). recommend_best와 asyncio.gather로 동시에 실행해 순차 호출
+    대비 지연을 줄인다 - 이 비스트리밍 경로는 결과를 한 번에만 반환하므로
+    (스트리밍 버전과 달리 중간에 먼저 보여줄 수 없다) 어차피 둘 다 끝나야
+    반환할 수 있어 그냥 gather로 묶는다.
+
+    facet_answers가 있으면(다중 선택) _product_name_matches 재검사를 건너뛴다
+    (2026-08-24 버그 리포트, "카테고리를 여러개 고르면 그중에 하나라도
+    포함되어 있으면 검색 결과를 가지고 올 수 있게 해야해") - _search_candidates가
+    이미 _filter_items_by_facet_answers로 관련성을 구조적으로 보장했는데,
+    같은 facet에서 고른 값 여러 개(예: "갤럭시S25", "갤럭시S26")가 한 query
+    문자열에 다 들어가면 spec_match.model_or_quantity_conflict가 "같은
+    family(갤럭시S#)의 값 집합이 다르다"고 오판해 둘 중 하나만 있는 상품을
+    전부 걸러내 버렸다(실측 확인) - OR로 고른 걸 사실상 AND로 요구하는
+    버그였다."""
+    ranked = await _search_and_rank_candidates(query, base_query, facet_answers)
+
+    # recommend_best(메인 선택)와 candidate_notes(다른 후보 각각의 이유)는
+    # 서로 의존하지 않는 별개 작업이라 동시에 실행한다 - 순서대로 부르면
+    # 두 호출 시간이 그대로 합산된다.
+    recommended, notes = await asyncio.gather(
+        gpt.recommend_best(query, ranked),
+        gpt.candidate_notes(query, ranked),
+    )
+    decision = _build_decision(ranked, recommended)
+    proposals = _build_proposals(ranked, notes)
     return DecideResponse(query=query, proposals=proposals, decision=decision)
 
 
@@ -194,15 +222,36 @@ async def run_elevenst_only_debate_stream(
     query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
 ) -> AsyncIterator[dict[str, Any]]:
     """run_elevenst_only_debate()의 스트리밍 버전 - 메인 검색 흐름
-    (/decide/stream)이 이 경로를 쓴다. status 이벤트 하나(진행 표시용) 후
-    final 이벤트 하나를 내보낸다."""
+    (/decide/stream)이 이 경로를 쓴다.
+
+    체감 속도 개선(2026-08-24, "메인 추천이 끝나는 대로 먼저 보여주고 다른
+    후보 이유는 준비되는 대로 나중에 채워 넣기") - candidate_notes(다른
+    후보 이유, 보통 더 느린 쪽)를 백그라운드 작업으로 미리 던져두고
+    recommend_best(메인 선택)만 기다린 뒤 final을 즉시 내보낸다. 이때
+    proposals는 아직 일반 문구로 채워진다(하단 카드 자체는 바로 보여주되
+    이유만 잠시 후 갱신). candidate_notes가 끝나면 실제 이유로 다시 채운
+    proposals를 notes 이벤트로 한 번 더 내보낸다 - 프론트가 이미 그려둔
+    카드의 이유 텍스트만 갈아끼운다. 실제 총 소요 시간은 그대로지만,
+    사용자가 아무것도 못 보고 기다리는 시간은 recommend_best 하나만큼으로
+    줄어든다."""
     yield {"type": "status", "stage": "searching"}
     try:
-        result = await run_elevenst_only_debate(query, base_query=base_query, facet_answers=facet_answers)
+        ranked = await _search_and_rank_candidates(query, base_query, facet_answers)
     except RuntimeError as exc:
         yield {"type": "error", "message": str(exc)}
         return
+
+    notes_task = asyncio.create_task(gpt.candidate_notes(query, ranked))
+    recommended = await gpt.recommend_best(query, ranked)
+    decision = _build_decision(ranked, recommended)
+    proposals = _build_proposals(ranked, {})
+    result = DecideResponse(query=query, proposals=proposals, decision=decision)
     yield {"type": "final", "result": result.model_dump()}
+
+    notes = await notes_task
+    if notes:
+        updated_proposals = _build_proposals(ranked, notes)
+        yield {"type": "notes", "proposals": [p.model_dump() for p in updated_proposals]}
 
 
 # check_clarify_facets()의 base_query 재사용 필터링 전용(사용자 요청, 2026-08-13:
