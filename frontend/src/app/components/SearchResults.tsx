@@ -595,7 +595,11 @@ export const SearchResults = ({
     displayedProposers.length > 1
       ? `${displayedProposers.map((a) => AGENT_LABEL[a] || a).join(' · ')} 공동 제안 채택`
       : `${AGENT_LABEL[displayedProposers[0]] || displayedProposers[0]} 제안 채택`;
-  const otherProposals = proposals.filter((p) => p.url !== displayed.url);
+  // 관련도순으로 이미 정렬돼 있어(app.debate._rank_by_relevance) 상위 4개만
+  // 잘라도 가장 관련성 높은 후보가 빠지지 않는다(2026-08-24 사용자 요청 -
+  // 후보 전부를 보여주면 카드가 너무 많아 보기 불편함).
+  const MAX_OTHER_PROPOSALS = 4;
+  const otherProposals = proposals.filter((p) => p.url !== displayed.url).slice(0, MAX_OTHER_PROPOSALS);
 
   return (
     <Card>
