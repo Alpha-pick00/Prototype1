@@ -33,8 +33,17 @@ QUERY_VARIANT_INSTRUCTIONS = (
 )
 
 
+# 2026-08-24 실측(app/agents/gpt.py 참고) - 호출마다 AsyncOpenAI를 새로
+# 만들면 매번 TCP/TLS 핸드셰이크를 새로 맺어 호출당 ~0.7초가 그냥 날아간다.
+# 모듈 레벨에 캐싱해 한 번만 만들고 재사용한다.
+_client_instance: AsyncOpenAI | None = None
+
+
 def _client() -> AsyncOpenAI:
-    return AsyncOpenAI(api_key=settings.hcx_api_key, base_url=settings.hcx_api_base, max_retries=0)
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = AsyncOpenAI(api_key=settings.hcx_api_key, base_url=settings.hcx_api_base, max_retries=0)
+    return _client_instance
 
 
 def build_query_variant_prompt(query: str) -> str:
