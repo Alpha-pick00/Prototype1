@@ -82,6 +82,32 @@ _CHITCHAT_FIRST_TOKENS = {
 _CHITCHAT_TOKEN_LIMIT = 6
 
 
+# (2026-08-24, 사용자 리포트 "'저렴한 아기 간식을 사고 싶어'처럼 자연어로
+# 질의하면 검색이 안 된다") - "인사말/대화체로 감싼 구매 의도" 질의를 정제
+# 없이 그대로 11번가 API의 keyword 파라미터로 넘기면 검색도 그라운딩
+# (_product_name_matches)도 실패한다. 이 판정에 걸리면 app.agents.gpt.refine_query로
+# 실제 상품명만 추출한 뒤 검색한다 - 그 외(이미 짧고 깨끗한 검색어)는 정제 자체를
+# 건너뛰어 불필요한 LLM 호출을 늘리지 않는다.
+_GREETING_PREFIX_PATTERN = re.compile(
+    r"^(안녕(하세요|하십니까)?|안뇽|하이|hi|hello|헬로+우?)[\s,!.?~♡]+\S",
+    re.IGNORECASE,
+)
+
+
+def looks_conversational_query(query: str) -> bool:
+    """질의가 실제 검색어가 아니라 "인사말 + 대화체 문장으로 감싼 구매 의도"
+    형태인지 판정한다(예: "저렴한 아기 간식을 사고 싶어", "안녕 나 컵을
+    사고싶어"). BUY_INTENT_PATTERN(사고싶어/사려고 등)이 문장 어디에 있든
+    매치되거나, 질의가 인사말로 시작하면서 그 뒤에 실제 내용이 더 있으면
+    (=인사말 하나로 끝나는 순수 잡담이 아니면) True. 순수 인사말 하나뿐인
+    잡담(_GREETING_PATTERN, 전체 일치)은 is_non_product_chitchat이 이미
+    앞단에서 걸러내므로 여기서 다시 신경 쓸 필요 없다."""
+    stripped = query.strip()
+    if not stripped:
+        return False
+    return bool(BUY_INTENT_PATTERN.search(stripped)) or bool(_GREETING_PREFIX_PATTERN.match(stripped))
+
+
 def is_non_product_chitchat(query: str) -> bool:
     """상품 검색이 아닌 인사말/잡담/시비를 순수 로컬 판정으로 감지한다 - 네트워크나
     LLM 호출이 전혀 없다(사용자 요청, 2026-08-15: "자기가 상품으로 인식못하는

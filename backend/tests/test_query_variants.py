@@ -113,7 +113,7 @@ def test_run_elevenst_only_debate_still_fails_when_variants_also_find_nothing(mo
         asyncio.run(debate.run_elevenst_only_debate("무관한질의"))
         raise AssertionError("RuntimeError가 발생해야 한다")
     except RuntimeError as exc:
-        assert "관련성 있는 상품을 찾지 못했다" in str(exc)
+        assert "관련성 있는 상품을 찾지 못했습니다" in str(exc)
 
 
 def test_generate_query_variants_returns_empty_when_key_missing(monkeypatch):
