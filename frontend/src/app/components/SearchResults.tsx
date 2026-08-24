@@ -115,34 +115,56 @@ const VerifiedBadge = ({ verified }: { verified: boolean | null | undefined }) =
 // (백엔드가 별도로 다운로드/재호스팅 안 함, backend/fetchers/elevenst.py 참고).
 // 없거나(image_url null) 깨진 이미지(onError)는 같은 자리에 중립
 // 플레이스홀더로 대체해 레이아웃이 흔들리지 않게 한다.
+// rank(2026-08-24, 사용자 요청: "메인으로 추천해준 거랑 아래 후보로 뜨는
+// 애들 번호가 있어서 구별하기 쉬웠으면 좋겠어") - 썸네일 좌상단에 순위
+// 배지를 겹쳐 그린다. 메인 추천은 1, "다른 후보"는 관련도순 그대로
+// 2부터 이어서 매긴다 - 사용자가 여러 카드 사이를 오갈 때 지금 보는 게
+// 몇 번째 후보인지 한눈에 구별하기 위함.
 const ProductThumbnail = ({
   src,
   alt,
   size = 'md',
+  rank,
 }: {
   src?: string | null;
   alt: string;
   size?: 'sm' | 'md';
+  rank?: number;
 }) => {
   const [errored, setErrored] = useState(false);
   const dim = size === 'sm' ? 'w-12 h-12' : 'w-16 h-16';
 
+  const rankBadge =
+    rank != null ? (
+      <span
+        className={`absolute -top-1.5 -left-1.5 flex items-center justify-center rounded-full text-[10px] font-medium ${
+          rank === 1 ? 'bg-neutral-950 text-white' : 'bg-white text-neutral-600 border border-black/10'
+        } w-5 h-5 shadow-sm`}
+      >
+        {rank}
+      </span>
+    ) : null;
+
   if (!src || errored) {
     return (
-      <div className={`shrink-0 ${dim} rounded-lg bg-black/5 flex items-center justify-center`}>
+      <div className={`relative shrink-0 ${dim} rounded-lg bg-black/5 flex items-center justify-center`}>
         <ImageOff className="w-4 h-4 text-neutral-300" />
+        {rankBadge}
       </div>
     );
   }
 
   return (
-    <img
-      src={src}
-      alt={alt}
-      loading="lazy"
-      onError={() => setErrored(true)}
-      className={`shrink-0 ${dim} rounded-lg object-cover border border-black/5 bg-white`}
-    />
+    <div className={`relative shrink-0 ${dim}`}>
+      <img
+        src={src}
+        alt={alt}
+        loading="lazy"
+        onError={() => setErrored(true)}
+        className={`w-full h-full rounded-lg object-cover border border-black/5 bg-white`}
+      />
+      {rankBadge}
+    </div>
   );
 };
 
@@ -601,6 +623,17 @@ export const SearchResults = ({
   const MAX_OTHER_PROPOSALS = 4;
   const otherProposals = proposals.filter((p) => p.url !== displayed.url).slice(0, MAX_OTHER_PROPOSALS);
 
+  // 순위 배지(2026-08-24, "메인 추천이랑 다른 후보 번호로 구별하기 쉬웠으면") -
+  // url에 고정된 번호를 매겨서, 다른 후보를 눌러 메인 카드에 띄워도(displayed가
+  // 바뀌어도) 그 상품의 번호 자체는 안 바뀐다. 최종 추천은 항상 1, 나머지는
+  // proposals의 관련도순 그대로 2부터 이어서 매긴다.
+  const rankByUrl: Record<string, number> = {};
+  if (decision.url) rankByUrl[decision.url] = 1;
+  let nextRank = 2;
+  for (const p of proposals) {
+    if (p.url && !(p.url in rankByUrl)) rankByUrl[p.url] = nextRank++;
+  }
+
   return (
     <Card>
       <div className="flex items-center justify-between mb-4">
@@ -624,7 +657,12 @@ export const SearchResults = ({
         className="group flex items-start justify-between gap-4 mb-3"
       >
         <div className="flex items-start gap-3 min-w-0">
-          <ProductThumbnail src={displayed.image_url} alt={displayed.product_name ?? ''} size="md" />
+          <ProductThumbnail
+            src={displayed.image_url}
+            alt={displayed.product_name ?? ''}
+            size="md"
+            rank={displayed.url ? rankByUrl[displayed.url] : undefined}
+          />
           <div className="min-w-0">
             <p className="text-lg font-medium text-neutral-950">{displayed.product_name}</p>
             <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
@@ -664,7 +702,12 @@ export const SearchResults = ({
                     onClick={() => setSelectedProposalUrl(g.url)}
                     className="flex items-start gap-2 text-left rounded-lg -mx-2 px-2 py-2 hover:bg-black/[0.03] transition-colors cursor-pointer"
                   >
-                    <ProductThumbnail src={matched.image_url} alt={matched.product_name ?? ''} size="sm" />
+                    <ProductThumbnail
+                      src={matched.image_url}
+                      alt={matched.product_name ?? ''}
+                      size="sm"
+                      rank={matched.url ? rankByUrl[matched.url] : undefined}
+                    />
                     <div className="min-w-0 flex flex-col items-start gap-1">
                       <span className="text-xs font-medium text-neutral-950">{g.label}</span>
                       <span className="text-xs font-light text-neutral-500 leading-relaxed">{g.description}</span>
@@ -701,7 +744,12 @@ export const SearchResults = ({
                       isPickable ? 'hover:bg-black/[0.03] cursor-pointer' : 'cursor-default'
                     }`}
                   >
-                    <ProductThumbnail src={p.image_url} alt={p.product_name ?? ''} size="sm" />
+                    <ProductThumbnail
+                      src={p.image_url}
+                      alt={p.product_name ?? ''}
+                      size="sm"
+                      rank={p.url ? rankByUrl[p.url] : undefined}
+                    />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
                         <VerifiedBadge verified={p.verified} />
@@ -710,6 +758,11 @@ export const SearchResults = ({
                       <p className="mt-1 font-light text-neutral-600 truncate">
                         {p.error ? p.error : `${p.product_name} · ${p.price || '가격 미확인'}`}
                       </p>
+                      {!p.error && p.reasoning && (
+                        <p className="mt-0.5 font-light text-neutral-400 leading-snug line-clamp-2">
+                          {p.reasoning}
+                        </p>
+                      )}
                     </div>
                   </button>
                 );
