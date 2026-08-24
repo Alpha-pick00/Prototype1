@@ -108,12 +108,13 @@ async def _maybe_refine_query(query: str) -> str:
 async def _search_and_rank_candidates(
     query: str, base_query: str | None, facet_answers: dict[str, list[str]] | None
 ) -> tuple[str, list[elevenst.ElevenstSearchItem]]:
-    """검색 -> 관련성 필터 -> (0건이면 대안 표기 재검색) -> 관련도순 정렬까지,
-    run_elevenst_only_debate()와 그 스트리밍 버전이 공유하는 앞부분이다.
-    질의가 대화체면(_maybe_refine_query) 검색 전에 먼저 정제한다 - 반환하는
-    질의는 호출부가 이후 추천 Agent 프롬프트/에러 메시지에도 일관되게 써야
-    한다(원래 질의로 검색하고 정제된 질의로 설명하면 앞뒤가 안 맞는다).
-    관련 상품을 하나도 못 찾으면 RuntimeError."""
+    """검색 -> 관련성 필터 -> (0건이면 임베딩 의미 유사도 구제 -> 그래도 0건이면
+    대안 표기 재검색) -> 관련도순 정렬까지, run_elevenst_only_debate()와 그
+    스트리밍 버전이 공유하는 앞부분이다. 질의가 대화체면(_maybe_refine_query)
+    검색 전에 먼저 정제한다 - 반환하는 질의는 호출부가 이후 추천 Agent
+    프롬프트/에러 메시지에도 일관되게 써야 한다(원래 질의로 검색하고 정제된
+    질의로 설명하면 앞뒤가 안 맞는다). 관련 상품을 하나도 못 찾으면
+    RuntimeError."""
     query = await _maybe_refine_query(query)
     items = await _search_candidates(query, base_query, facet_answers)
     relevant = (
@@ -121,6 +122,8 @@ async def _search_and_rank_candidates(
         if facet_answers
         else [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
     )
+    if not relevant and not facet_answers:
+        relevant = await price_table_module.semantic_relevance_fallback(query, items)
     if not relevant:
         relevant = await _search_with_query_variants(query)
     if not relevant:

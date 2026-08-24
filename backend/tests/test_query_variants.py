@@ -109,6 +109,11 @@ def test_run_elevenst_only_debate_still_fails_when_variants_also_find_nothing(mo
 
     monkeypatch.setattr(debate.hcx, "generate_query_variants", _fake_variants)
 
+    async def _no_embed(texts):
+        return None
+
+    monkeypatch.setattr(debate.embeddings, "embed", _no_embed)
+
     try:
         asyncio.run(debate.run_elevenst_only_debate("무관한질의"))
         raise AssertionError("RuntimeError가 발생해야 한다")

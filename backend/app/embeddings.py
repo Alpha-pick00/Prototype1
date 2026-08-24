@@ -27,15 +27,30 @@ def _client() -> AsyncOpenAI:
     return _client_instance
 
 
+# 2026-08-24 실측(BadRequestError: "batch size is invalid, it should not be
+# larger than 10") - DashScope text-embedding-v3의 하드 제한. 검색 결과
+# 기본 limit(10)에서 전부 관련성 필터를 통과하면 [query, *10개 상품명] = 11개로
+# 이 제한을 조용히 넘겨 임베딩 전체가 실패하고(return None) 랭킹이 11번가
+# 원래 순서로 조용히 폴백되는 문제가 있었다 - 흔한 케이스(꽉 찬 검색 결과)를
+# 매번 조용히 망가뜨리고 있었다는 뜻이라 조용히 넘길 수 없는 버그.
+_MAX_EMBED_BATCH = 10
+
+
 async def embed(texts: list[str]) -> list[list[float]] | None:
     """실패(키 없음·API 오류)하면 None을 돌려준다 - 호출부는 임베딩 없이
-    원래 순서를 그대로 쓰는 폴백을 갖는다."""
+    원래 순서를 그대로 쓰는 폴백을 갖는다. 10개 넘는 texts는 여러 번 나눠
+    호출해 이어붙인다(위 _MAX_EMBED_BATCH 설명 참고) - 호출부가 이 제한을
+    직접 신경 쓸 필요 없도록 여기서 흡수한다."""
     if not texts or not settings.qwen_api_key:
         return None
     try:
         client = _client()
-        response = await client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
-        return [d.embedding for d in response.data]
+        vectors: list[list[float]] = []
+        for i in range(0, len(texts), _MAX_EMBED_BATCH):
+            chunk = texts[i : i + _MAX_EMBED_BATCH]
+            response = await client.embeddings.create(model=EMBEDDING_MODEL, input=chunk)
+            vectors.extend(d.embedding for d in response.data)
+        return vectors
     except Exception:
         return None
 

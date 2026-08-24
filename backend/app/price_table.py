@@ -11,6 +11,7 @@ from rapidfuzz import fuzz
 from fetchers import elevenst
 from fusion.dedup import NAME_SIMILARITY_THRESHOLD
 
+from . import embeddings
 from .exclusive_tokens import exclusive_tokens_conflict
 from .spec_match import model_or_quantity_conflict
 
@@ -83,3 +84,45 @@ def _product_name_matches(decision_name: str, candidate_name: str) -> bool:
     if exclusive_tokens_conflict(decision_name, candidate_name):
         return False
     return True
+
+
+# 2026-08-24 실측(사용자 리포트 "망고주스를 사고 싶어 검색이 안 됨") -
+# _product_name_matches는 공백으로 나눈 토큰이 문자 그대로 겹쳐야 점수가
+# 나온다. "망고주스"(질의, 붙여쓰기)와 11번가 실제 표기 "카프리썬 오렌지망고
+# 200ml x 40입 주스"(단어가 쪼개지고 순서도 다름)는 같은 상품인데 토큰이
+# 하나도 안 겹쳐 token_set_ratio 19.5점(임계값 85)으로 전부 걸러졌다 - 이건
+# "이프로"류(표기가 아예 다른 케이스)와 달리 표기 자체는 맞지만 띄어쓰기
+# 단위가 다른 경우라 _search_with_query_variants(HCX 대안 표기)로도 못
+# 구제한다. 임베딩 코사인 유사도는 띄어쓰기/순서와 무관하게 의미로
+# 비교하므로 이 케이스를 구제한다 - 실측: 진짜 망고주스류 0.65~0.72,
+# 무관하거나 결이 다른 상품(사과 드링크, 과일향 차음료) 0.50~0.56.
+_SEMANTIC_FALLBACK_THRESHOLD = 0.6
+
+
+async def semantic_relevance_fallback(
+    query: str, items: list[elevenst.ElevenstSearchItem]
+) -> list[elevenst.ElevenstSearchItem]:
+    """_product_name_matches가 하나도 못 찾았을 때만 쓰는 2차 관련성 판정
+    (app.debate._search_and_rank_candidates 참고) - 순수 의미 유사도만으로는
+    모델/수량/배타 속성 차이(예: 아이폰6 vs 아이폰15, 백미 vs 현미)를 못
+    잡으므로, 기존 가드(model_or_quantity_conflict, exclusive_tokens_conflict)는
+    그대로 적용해서 통과시킨다 - 표기 차이는 구제하되 진짜 다른 상품까지
+    구제하지 않기 위함."""
+    if not items:
+        return []
+    names = [it["product_name"] for it in items]
+    query_vec = await embeddings.embed([query])
+    item_vecs = await embeddings.embed(names)
+    if query_vec is None or item_vecs is None:
+        return []
+    qv = query_vec[0]
+    matches = []
+    for it, name, vec in zip(items, names, item_vecs):
+        if embeddings.cosine_similarity(qv, vec) < _SEMANTIC_FALLBACK_THRESHOLD:
+            continue
+        if model_or_quantity_conflict(query, name):
+            continue
+        if exclusive_tokens_conflict(query, name):
+            continue
+        matches.append(it)
+    return matches

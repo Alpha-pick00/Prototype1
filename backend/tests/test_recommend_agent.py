@@ -692,3 +692,63 @@ def test_run_elevenst_only_debate_falls_back_to_original_query_when_refine_fails
 
     # 정제 실패해도 원래 질의 그대로 검색을 계속 진행해야 한다.
     assert result.query == "아기 간식을 사고 싶어"
+
+
+def test_run_elevenst_only_debate_uses_semantic_fallback_when_rapidfuzz_rejects_everything(monkeypatch):
+    """실측(2026-08-24, "망고주스를 사고 싶어" 검색 실패) - rapidfuzz가 표기
+    차이(붙여쓰기 vs 쪼개서 다른 순서)로 진짜 매치를 전부 거부해도,
+    semantic_relevance_fallback이 임베딩 유사도로 구제하면 검색이 성공해야
+    한다."""
+
+    async def _fake_search(query, limit=10):
+        return [_item("카프리썬 오렌지망고 200ml x 40입 주스", 15000, "1")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    # rapidfuzz 기반 1차 필터는 항상 거부(실측처럼 표기 차이로 전부 탈락하는 상황을 재현).
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: False)
+
+    async def _fake_embed(texts):
+        return [[1.0, 0.0] if t == "망고주스" else [0.9, 0.1] for t in texts]
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _fake_recommend(query, candidates):
+        return 0, "가장 관련성 높음"
+
+    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
+
+    result = asyncio.run(debate.run_elevenst_only_debate("망고주스"))
+
+    assert result.decision.product_name == "카프리썬 오렌지망고 200ml x 40입 주스"
+
+
+def test_run_elevenst_only_debate_skips_semantic_fallback_for_facet_drilldown(monkeypatch):
+    """facet_answers가 있는 드릴다운 경로는 이미 _filter_items_by_facet_answers로
+    걸러진 결과라 semantic_relevance_fallback을 또 태우면 안 된다(불필요한
+    임베딩 호출) - 0건이면 그냥 대안 표기 재검색으로 넘어가야 한다."""
+
+    async def _fake_search(query, limit=10):
+        return []
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _boom_semantic_fallback(query, items):
+        raise AssertionError("facet_answers 드릴다운인데 semantic_relevance_fallback이 호출됐다")
+
+    monkeypatch.setattr(debate.price_table_module, "semantic_relevance_fallback", _boom_semantic_fallback)
+
+    async def _fake_variants(query):
+        return []
+
+    monkeypatch.setattr(debate.hcx, "generate_query_variants", _fake_variants)
+
+    try:
+        asyncio.run(
+            debate.run_elevenst_only_debate(
+                "찾는 상품 브랜드A", base_query="찾는 상품", facet_answers={"브랜드": ["브랜드A"]}
+            )
+        )
+        raise AssertionError("RuntimeError가 발생해야 한다")
+    except RuntimeError as exc:
+        assert "관련성 있는 상품을 찾지 못했습니다" in str(exc)
