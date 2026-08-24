@@ -115,34 +115,60 @@ const VerifiedBadge = ({ verified }: { verified: boolean | null | undefined }) =
 // (백엔드가 별도로 다운로드/재호스팅 안 함, backend/fetchers/elevenst.py 참고).
 // 없거나(image_url null) 깨진 이미지(onError)는 같은 자리에 중립
 // 플레이스홀더로 대체해 레이아웃이 흔들리지 않게 한다.
+// rank(2026-08-24, 사용자 요청: "메인으로 추천해준 거랑 아래 후보로 뜨는
+// 애들 번호가 있어서 구별하기 쉬웠으면 좋겠어") - 썸네일 좌상단에 순위
+// 배지를 겹쳐 그린다. 메인 추천은 1, "다른 후보"는 관련도순 그대로
+// 2부터 이어서 매긴다 - 사용자가 여러 카드 사이를 오갈 때 지금 보는 게
+// 몇 번째 후보인지 한눈에 구별하기 위함.
 const ProductThumbnail = ({
   src,
   alt,
   size = 'md',
+  rank,
 }: {
   src?: string | null;
   alt: string;
   size?: 'sm' | 'md';
+  rank?: number;
 }) => {
   const [errored, setErrored] = useState(false);
-  const dim = size === 'sm' ? 'w-12 h-12' : 'w-16 h-16';
+  // 2026-08-24 사용자 요청("사진 크기만 더 크게") - md 96px -> 128px,
+  // sm 64px -> 96px.
+  const dim = size === 'sm' ? 'w-24 h-24' : 'w-32 h-32';
+  const badgeDim = size === 'sm' ? 'w-6 h-6 text-xs' : 'w-7 h-7 text-sm';
+  const iconDim = size === 'sm' ? 'w-5 h-5' : 'w-7 h-7';
+
+  const rankBadge =
+    rank != null ? (
+      <span
+        className={`absolute -top-1.5 -left-1.5 flex items-center justify-center rounded-full font-medium ${
+          rank === 1 ? 'bg-neutral-950 text-white' : 'bg-white text-neutral-600 border border-black/10'
+        } ${badgeDim} shadow-sm`}
+      >
+        {rank}
+      </span>
+    ) : null;
 
   if (!src || errored) {
     return (
-      <div className={`shrink-0 ${dim} rounded-lg bg-black/5 flex items-center justify-center`}>
-        <ImageOff className="w-4 h-4 text-neutral-300" />
+      <div className={`relative shrink-0 ${dim} rounded-lg bg-black/5 flex items-center justify-center`}>
+        <ImageOff className={`${iconDim} text-neutral-300`} />
+        {rankBadge}
       </div>
     );
   }
 
   return (
-    <img
-      src={src}
-      alt={alt}
-      loading="lazy"
-      onError={() => setErrored(true)}
-      className={`shrink-0 ${dim} rounded-lg object-cover border border-black/5 bg-white`}
-    />
+    <div className={`relative shrink-0 ${dim}`}>
+      <img
+        src={src}
+        alt={alt}
+        loading="lazy"
+        onError={() => setErrored(true)}
+        className={`w-full h-full rounded-lg object-cover border border-black/5 bg-white`}
+      />
+      {rankBadge}
+    </div>
   );
 };
 
@@ -609,35 +635,69 @@ export const SearchResults = ({
     displayedProposers.length > 1
       ? `${displayedProposers.map((a) => AGENT_LABEL[a] || a).join(' · ')} 공동 제안 채택`
       : `${AGENT_LABEL[displayedProposers[0]] || displayedProposers[0]} 제안 채택`;
-  const otherProposals = proposals.filter((p) => p.url !== displayed.url);
+  // 관련도순으로 이미 정렬돼 있어(app.debate._rank_by_relevance) 상위 4개만
+  // 잘라도 가장 관련성 높은 후보가 빠지지 않는다(2026-08-24 사용자 요청 -
+  // 후보 전부를 보여주면 카드가 너무 많아 보기 불편함).
+  const MAX_OTHER_PROPOSALS = 4;
+  let otherProposals = proposals.filter((p) => p.url !== displayed.url).slice(0, MAX_OTHER_PROPOSALS);
+  // 최종 추천(1번)은 관련도 자체는 낮을 수 있다(추천 Agent가 가격/리뷰
+  // 기준으로 고르기 때문) - 다른 후보를 보는 중(isAlternate)에 1번이 상위
+  // 4개 밖으로 밀려나면 "1번으로 돌아갈 번호"가 목록에서 아예 사라진다
+  // (2026-08-24 버그 리포트 - "다시 1번으로 돌아갈 수 있게 번호가 떠야
+  // 하는데 번호가 제대로 안뜨는 것 같다"). isAlternate일 땐 1번을 항상
+  // 강제로 끼워 넣는다.
+  if (isAlternate && !otherProposals.some((p) => p.url === decision.url)) {
+    const decisionProposal = proposals.find((p) => p.url === decision.url);
+    if (decisionProposal) {
+      otherProposals = [decisionProposal, ...otherProposals.slice(0, MAX_OTHER_PROPOSALS - 1)];
+    }
+  }
+
+  // 순위 배지(2026-08-24, "메인 추천이랑 다른 후보 번호로 구별하기 쉬웠으면") -
+  // url에 고정된 번호를 매겨서, 다른 후보를 눌러 메인 카드에 띄워도(displayed가
+  // 바뀌어도) 그 상품의 번호 자체는 안 바뀐다. 최종 추천은 항상 1, 나머지는
+  // proposals의 관련도순 그대로 2부터 이어서 매긴다.
+  const rankByUrl: Record<string, number> = {};
+  if (decision.url) rankByUrl[decision.url] = 1;
+  let nextRank = 2;
+  for (const p of proposals) {
+    if (p.url && !(p.url in rankByUrl)) rankByUrl[p.url] = nextRank++;
+  }
 
   return (
     <Card>
-      <div className="flex items-center justify-between mb-4">
-        <span className="text-xs font-mono uppercase tracking-widest text-neutral-400">
-          {isAlternate ? `다른 후보 · ${headerLabel}` : `최종 추천 · ${headerLabel}`}
-        </span>
-        {isAlternate && (
+      <div className="flex items-center mb-4">
+        {isAlternate ? (
           <button
             type="button"
             onClick={() => setSelectedProposalUrl(null)}
             className="text-xs font-mono uppercase tracking-widest text-neutral-400 hover:text-neutral-950 transition-colors"
           >
-            AI 추천으로
+            AI추천
           </button>
+        ) : (
+          <span className="text-xs font-mono uppercase tracking-widest text-neutral-400">
+            최종 추천 · {headerLabel}
+          </span>
         )}
       </div>
       <a
         href={displayed.url ?? undefined}
         target="_blank"
         rel="noopener noreferrer"
-        className="group flex items-start justify-between gap-4 mb-3"
+        className="group flex items-start justify-between gap-4 mb-6"
       >
         <div className="flex items-start gap-3 min-w-0">
-          <ProductThumbnail src={displayed.image_url} alt={displayed.product_name ?? ''} size="md" />
+          <ProductThumbnail
+            src={displayed.image_url}
+            alt={displayed.product_name ?? ''}
+            size="md"
+            rank={displayed.url ? rankByUrl[displayed.url] : undefined}
+          />
           <div className="min-w-0">
             <p className="text-lg font-medium text-neutral-950">{displayed.product_name}</p>
             <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
+            <p className="mt-1.5 text-sm font-light text-neutral-600 leading-relaxed break-keep">{displayed.reasoning}</p>
           </div>
         </div>
         <div className="shrink-0 flex items-center gap-2">
@@ -647,7 +707,6 @@ export const SearchResults = ({
           <ArrowUpRight className="w-5 h-5 text-neutral-300 group-hover:text-neutral-950 transition-colors" />
         </div>
       </a>
-      <p className="text-sm font-light text-neutral-600 leading-relaxed mb-6">{displayed.reasoning}</p>
 
       {/* 취향 주도 카테고리(패션의류/잡화 등)에서만 채워진다 - GPT 쇼핑의
           스타일 가이드 벤치마킹(2026-08-19). 그룹의 상품명/가격/판매처는
@@ -671,10 +730,19 @@ export const SearchResults = ({
                   <button
                     key={g.url}
                     type="button"
-                    onClick={() => setSelectedProposalUrl(g.url)}
+                    // 1번(최종 추천) 자기 자신을 눌렀으면 proposals 목록의
+                    // 평범한 버전이 아니라 진짜 "최종 추천" 상태(decision의
+                    // 원래 reasoning·헤더 라벨)로 돌아가야 한다 - null로
+                    // 리셋하면 displayed가 다시 decision을 가리킨다.
+                    onClick={() => setSelectedProposalUrl(g.url === decision.url ? null : g.url)}
                     className="flex items-start gap-2 text-left rounded-lg -mx-2 px-2 py-2 hover:bg-black/[0.03] transition-colors cursor-pointer"
                   >
-                    <ProductThumbnail src={matched.image_url} alt={matched.product_name ?? ''} size="sm" />
+                    <ProductThumbnail
+                      src={matched.image_url}
+                      alt={matched.product_name ?? ''}
+                      size="sm"
+                      rank={matched.url ? rankByUrl[matched.url] : undefined}
+                    />
                     <div className="min-w-0 flex flex-col items-start gap-1">
                       <span className="text-xs font-medium text-neutral-950">{g.label}</span>
                       <span className="text-xs font-light text-neutral-500 leading-relaxed">{g.description}</span>
@@ -698,7 +766,7 @@ export const SearchResults = ({
             <span className="text-[11px] font-mono uppercase tracking-widest text-neutral-400 block mb-2">
               다른 후보
             </span>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {otherProposals.map((p, i) => {
                 const isPickable = !p.error && !!p.url && !!p.product_name;
                 return (
@@ -706,20 +774,33 @@ export const SearchResults = ({
                     key={p.url ?? i}
                     type="button"
                     disabled={!isPickable}
-                    onClick={() => isPickable && setSelectedProposalUrl(p.url)}
-                    className={`flex items-start gap-2 text-xs text-left rounded-lg -mx-2 px-2 py-1.5 transition-colors ${
+                    // 1번(최종 추천) 자기 자신을 눌렀으면 proposals 목록의
+                    // 평범한 버전이 아니라 진짜 "최종 추천" 상태(decision의
+                    // 원래 reasoning·헤더 라벨)로 돌아가야 한다 - null로
+                    // 리셋하면 displayed가 다시 decision을 가리킨다(2026-08-24
+                    // 버그 리포트 - "다른 후보 보고 1번으로 돌아가면 요약본으로
+                    // 뜬다").
+                    onClick={() => isPickable && setSelectedProposalUrl(p.url === decision.url ? null : p.url)}
+                    className={`flex items-start gap-3 text-sm text-left rounded-lg -mx-2 px-3 py-2.5 transition-colors ${
                       isPickable ? 'hover:bg-black/[0.03] cursor-pointer' : 'cursor-default'
                     }`}
                   >
-                    <ProductThumbnail src={p.image_url} alt={p.product_name ?? ''} size="sm" />
+                    <ProductThumbnail
+                      src={p.image_url}
+                      alt={p.product_name ?? ''}
+                      size="sm"
+                      rank={p.url ? rankByUrl[p.url] : undefined}
+                    />
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5">
-                        <VerifiedBadge verified={p.verified} />
-                        <ProposedByChips proposedBy={p.proposed_by} />
-                      </div>
+                      <ProposedByChips proposedBy={p.proposed_by} />
                       <p className="mt-1 font-light text-neutral-600 truncate">
                         {p.error ? p.error : `${p.product_name} · ${p.price || '가격 미확인'}`}
                       </p>
+                      {!p.error && p.reasoning && (
+                        <p className="mt-0.5 text-xs font-light text-neutral-400 leading-snug line-clamp-2 break-keep">
+                          {p.reasoning}
+                        </p>
+                      )}
                     </div>
                   </button>
                 );

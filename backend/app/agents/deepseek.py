@@ -11,11 +11,20 @@ from .base import build_facet_clarify_prompt, build_facet_clarify_prompt_for_lab
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 
+# 2026-08-24 실측(app/agents/gpt.py 참고) - 호출마다 AsyncOpenAI를 새로
+# 만들면 매번 TCP/TLS 핸드셰이크를 새로 맺어 호출당 ~0.7초가 그냥 날아간다.
+# 모듈 레벨에 캐싱해 한 번만 만들고 재사용한다.
+_client_instance: AsyncOpenAI | None = None
+
+
 def _client() -> AsyncOpenAI:
     # max_retries=0 - 사용자 요청(2026-08-15: "너무
     # 느려 더 빠르게"). 실패해도 호출부가 이미 폴백을 갖고 있어 SDK 재시도로
     # 얻는 이득보다 지연 비용이 크다.
-    return AsyncOpenAI(api_key=settings.deepseek_api_key, base_url=DEEPSEEK_BASE_URL, max_retries=0)
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = AsyncOpenAI(api_key=settings.deepseek_api_key, base_url=DEEPSEEK_BASE_URL, max_retries=0)
+    return _client_instance
 
 
 MAX_FACETS = 4
