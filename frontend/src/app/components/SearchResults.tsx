@@ -493,7 +493,7 @@ export const SearchResults = ({
               onClick={onSearchBroadly}
               className="text-sm font-light text-neutral-400 hover:text-neutral-950 transition-colors"
             >
-              조건 없이 포괄적으로 검색
+              조건 없이 검색
             </button>
             <button
               onClick={() => onConfirmFacets(effectiveSelectedFacets)}
