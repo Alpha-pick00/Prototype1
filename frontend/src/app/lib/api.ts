@@ -1,6 +1,8 @@
 export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-export type AgentName = 'gpt' | 'groq' | 'deepseek';
+// "danawa"는 과거(다나와 실측 시절) 저장된 기록 호환용, 새로 오는 값은
+// "elevenst"뿐이다 - backend/app/schemas.py의 AgentName과 맞춘다.
+export type AgentName = 'gpt' | 'groq' | 'deepseek' | 'danawa' | 'elevenst';
 
 export interface Proposal {
   agent: AgentName;
@@ -8,8 +10,8 @@ export interface Proposal {
   price: string | null;
   retailer: string | null;
   url: string | null;
-  // 다나와 실측 페이지에서 스크래핑한 대표 상품 이미지 - danawa 출신 후보에만
-  // 채워진다(LLM이 지어낸 값이 아님).
+  // 상품 대표 이미지(2026-08-24) - 11번가 오픈 API ProductImage300을 그대로
+  // hotlink한다(backend/fetchers/elevenst.py).
   image_url?: string | null;
   reasoning: string | null;
   error: string | null;

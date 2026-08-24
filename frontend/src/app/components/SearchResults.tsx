@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
-import { AlertTriangle, ArrowUpRight, Check, Loader2, RotateCcw, Search, Sparkles, Truck, X } from 'lucide-react';
+import { AlertTriangle, ArrowUpRight, Check, ImageOff, Loader2, RotateCcw, Search, Sparkles, Truck, X } from 'lucide-react';
 import type {
   ClarifyFacet as ClarifyFacetType,
   DecideResult,
@@ -109,6 +109,41 @@ const VerifiedBadge = ({ verified }: { verified: boolean | null | undefined }) =
     );
   }
   return <div className="shrink-0 w-5 h-5 rounded-full bg-black/5" />;
+};
+
+// GPT 쇼핑식 카드(2026-08-24) - 11번가 ProductImage300을 그대로 hotlink한다
+// (백엔드가 별도로 다운로드/재호스팅 안 함, backend/fetchers/elevenst.py 참고).
+// 없거나(image_url null) 깨진 이미지(onError)는 같은 자리에 중립
+// 플레이스홀더로 대체해 레이아웃이 흔들리지 않게 한다.
+const ProductThumbnail = ({
+  src,
+  alt,
+  size = 'md',
+}: {
+  src?: string | null;
+  alt: string;
+  size?: 'sm' | 'md';
+}) => {
+  const [errored, setErrored] = useState(false);
+  const dim = size === 'sm' ? 'w-12 h-12' : 'w-16 h-16';
+
+  if (!src || errored) {
+    return (
+      <div className={`shrink-0 ${dim} rounded-lg bg-black/5 flex items-center justify-center`}>
+        <ImageOff className="w-4 h-4 text-neutral-300" />
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      onError={() => setErrored(true)}
+      className={`shrink-0 ${dim} rounded-lg object-cover border border-black/5 bg-white`}
+    />
+  );
 };
 
 const CandidateProgressRow = ({ proposal }: { proposal: Proposal }) => (
@@ -585,17 +620,7 @@ export const SearchResults = ({
         className="group flex items-start justify-between gap-4 mb-3"
       >
         <div className="flex items-start gap-3 min-w-0">
-          {displayed.image_url && (
-            <img
-              src={displayed.image_url}
-              alt={displayed.product_name ?? ''}
-              className="w-16 h-16 shrink-0 rounded-lg object-cover border border-black/5 bg-white"
-              loading="lazy"
-              onError={(e) => {
-                e.currentTarget.style.display = 'none';
-              }}
-            />
-          )}
+          <ProductThumbnail src={displayed.image_url} alt={displayed.product_name ?? ''} size="md" />
           <div className="min-w-0">
             <p className="text-lg font-medium text-neutral-950">{displayed.product_name}</p>
             <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
@@ -633,13 +658,16 @@ export const SearchResults = ({
                     key={g.url}
                     type="button"
                     onClick={() => setSelectedProposalUrl(g.url)}
-                    className="flex flex-col items-start gap-1 text-left rounded-lg -mx-2 px-2 py-2 hover:bg-black/[0.03] transition-colors cursor-pointer"
+                    className="flex items-start gap-2 text-left rounded-lg -mx-2 px-2 py-2 hover:bg-black/[0.03] transition-colors cursor-pointer"
                   >
-                    <span className="text-xs font-medium text-neutral-950">{g.label}</span>
-                    <span className="text-xs font-light text-neutral-500 leading-relaxed">{g.description}</span>
-                    <span className="text-xs font-light text-neutral-600 mt-1">
-                      {matched.product_name} · {matched.price || '가격 미확인'}
-                    </span>
+                    <ProductThumbnail src={matched.image_url} alt={matched.product_name ?? ''} size="sm" />
+                    <div className="min-w-0 flex flex-col items-start gap-1">
+                      <span className="text-xs font-medium text-neutral-950">{g.label}</span>
+                      <span className="text-xs font-light text-neutral-500 leading-relaxed">{g.description}</span>
+                      <span className="text-xs font-light text-neutral-600 mt-1">
+                        {matched.product_name} · {matched.price || '가격 미확인'}
+                      </span>
+                    </div>
                   </button>
                 );
               })}
@@ -669,9 +697,12 @@ export const SearchResults = ({
                       isPickable ? 'hover:bg-black/[0.03] cursor-pointer' : 'cursor-default'
                     }`}
                   >
-                    <VerifiedBadge verified={p.verified} />
-                    <div className="min-w-0">
-                      <ProposedByChips proposedBy={p.proposed_by} />
+                    <ProductThumbnail src={p.image_url} alt={p.product_name ?? ''} size="sm" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <VerifiedBadge verified={p.verified} />
+                        <ProposedByChips proposedBy={p.proposed_by} />
+                      </div>
                       <p className="mt-1 font-light text-neutral-600 truncate">
                         {p.error ? p.error : `${p.product_name} · ${p.price || '가격 미확인'}`}
                       </p>

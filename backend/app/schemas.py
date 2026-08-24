@@ -25,9 +25,9 @@ class Proposal(BaseModel):
     retailer: str | None = None
     url: str | None = None
     # 상품 대표 이미지 - 원래 다나와 스크래핑(fetchers/danawa.py)에서만 채웠는데
-    # 다나와 파이프라인이 11번가 오픈 API로 교체되며 그 소스가 사라졌다. 필드는
-    # 호환을 위해 남겨두지만 지금은 아무 코드도 채우지 않는다(항상 None) -
-    # 11번가 API 응답에 이미지 필드가 있는지 확인 후 다시 연결이 필요하다.
+    # 다나와 파이프라인이 11번가 오픈 API로 교체되며 그 소스가 사라졌었다.
+    # 2026-08-24: 11번가 API 응답에도 ProductImage300 필드가 있는 걸 확인해
+    # fetchers/elevenst.py에서 다시 파싱, app.debate가 채워준다.
     image_url: str | None = None
     reasoning: str | None = None
     error: str | None = None
@@ -72,8 +72,8 @@ class Decision(BaseModel):
     price: str
     retailer: str
     url: str
-    # Proposal.image_url과 같은 이유로 지금은 항상 None(11번가 API 이미지 필드
-    # 재연결 전까지).
+    # Proposal.image_url과 같은 이유(2026-08-24 재연결) - fetchers/elevenst.py
+    # 참고.
     image_url: str | None = None
     reasoning: str
     chosen_agent: AgentName
