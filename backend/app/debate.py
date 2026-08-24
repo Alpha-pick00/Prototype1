@@ -140,6 +140,7 @@ async def run_elevenst_only_debate(
         reasoning=reasoning,
         chosen_agent="elevenst",
         price_source="elevenst_offer",
+        image_url=best.get("image_url"),
     )
     proposals = [
         Proposal(
@@ -150,6 +151,7 @@ async def run_elevenst_only_debate(
             url=it["url"],
             reasoning="11번가 오픈 API 검증 결과 (관련도순 - 함께 볼만한 상품)",
             verified=True,
+            image_url=it.get("image_url"),
         )
         for it in ranked
     ]

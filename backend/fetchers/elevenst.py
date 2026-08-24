@@ -72,6 +72,7 @@ class ElevenstSearchItem(TypedDict):
     url: str
     review_count: int | None
     buy_satisfy: int | None
+    image_url: str | None
 
 
 def _text(el: ElementTree.Element | None) -> str:
@@ -106,6 +107,11 @@ def parse_search_xml(xml_text: str) -> list[ElevenstSearchItem]:
             continue
         review_text = _text(product.find("ReviewCount"))
         satisfy_text = _text(product.find("BuySatisfy"))
+        # ProductImage300(가로 300px) - 실측(2026-08-24)으로 확인한 카드 UI에 쓸
+        # 썸네일 크기. 100~300 사이 여러 크기 태그가 오는데(11dims CDN 리사이즈
+        # 파라미터만 다름) 카드에 맞는 해상도 하나만 쓴다 - 없으면(드묾) 원본
+        # ProductImage로 대체.
+        image_url = _text(product.find("ProductImage300")) or _text(product.find("ProductImage")) or None
         items.append(
             ElevenstSearchItem(
                 product_code=product_code,
@@ -115,6 +121,7 @@ def parse_search_xml(xml_text: str) -> list[ElevenstSearchItem]:
                 url=url,
                 review_count=int(review_text) if review_text.isdigit() else None,
                 buy_satisfy=int(satisfy_text) if satisfy_text.isdigit() else None,
+                image_url=image_url,
             )
         )
     return items

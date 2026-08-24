@@ -9,7 +9,7 @@ from app import debate
 from fetchers.elevenst import ElevenstSearchItem
 
 
-def _item(name: str, price: int, code: str = "1") -> ElevenstSearchItem:
+def _item(name: str, price: int, code: str = "1", image_url: str | None = None) -> ElevenstSearchItem:
     return ElevenstSearchItem(
         product_code=code,
         product_name=name,
@@ -18,6 +18,7 @@ def _item(name: str, price: int, code: str = "1") -> ElevenstSearchItem:
         url=f"https://www.11st.co.kr/products/{code}",
         review_count=None,
         buy_satisfy=None,
+        image_url=image_url,
     )
 
 
@@ -115,6 +116,37 @@ def test_run_elevenst_only_debate_uses_recommend_agent_pick_over_cheapest(monkey
     assert result.decision.price == "2,000원"
     assert "추천 Agent" in result.decision.reasoning
     assert len(result.proposals) == 2
+
+
+def test_run_elevenst_only_debate_propagates_image_url_to_decision_and_proposals(monkeypatch):
+    """카드 UI가 쓸 image_url이 ElevenstSearchItem -> Decision/Proposal까지
+    끊기지 않고 전달되는지 확인한다."""
+
+    async def _fake_search(query, limit=10):
+        return [
+            _item("찾는 상품 A", 1000, "1", image_url="https://cdn.011st.com/a.webp"),
+            _item("찾는 상품 B", 2000, "2", image_url="https://cdn.011st.com/b.webp"),
+        ]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
+
+    async def _fake_embed(texts):
+        return None
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _fake_recommend(query, candidates):
+        return 0, "가장 저렴함"
+
+    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+
+    result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
+
+    assert result.decision.image_url == "https://cdn.011st.com/a.webp"
+    by_code = {p.url: p.image_url for p in result.proposals}
+    assert by_code["https://www.11st.co.kr/products/1"] == "https://cdn.011st.com/a.webp"
+    assert by_code["https://www.11st.co.kr/products/2"] == "https://cdn.011st.com/b.webp"
 
 
 def test_run_elevenst_only_debate_falls_back_to_cheapest_when_recommend_agent_fails(monkeypatch):

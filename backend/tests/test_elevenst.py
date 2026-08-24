@@ -11,7 +11,7 @@ import pytest
 
 from fetchers import elevenst
 
-_SAMPLE_XML = """<?xml version="1.0" encoding="EUC-KR"?><ProductSearchResponse><Request><Arguments></Arguments></Request><Products><TotalCount>2</TotalCount><Product><ProductCode>111</ProductCode><ProductName><![CDATA[나이키 에어 포스 1 07]]></ProductName><ProductPrice>200000</ProductPrice><SalePrice>190000</SalePrice><SellerNick><![CDATA[퀀텍스]]></SellerNick><Seller>quantex</Seller><DetailPageUrl><![CDATA[http://www.11st.co.kr/product/SellerProductDetail.tmall?method=getSellerProductDetail&prdNo=111]]></DetailPageUrl><ReviewCount>5</ReviewCount><BuySatisfy>90</BuySatisfy></Product><Product><ProductCode>222</ProductCode><ProductName><![CDATA[나이키 에어 포스 1 07 화이트]]></ProductName><ProductPrice>180000</ProductPrice><SalePrice></SalePrice><SellerNick><![CDATA[]]></SellerNick><Seller>seller2</Seller><DetailPageUrl><![CDATA[http://www.11st.co.kr/product/SellerProductDetail.tmall?method=getSellerProductDetail&prdNo=222]]></DetailPageUrl><ReviewCount></ReviewCount><BuySatisfy></BuySatisfy></Product></Products></ProductSearchResponse>"""
+_SAMPLE_XML = """<?xml version="1.0" encoding="EUC-KR"?><ProductSearchResponse><Request><Arguments></Arguments></Request><Products><TotalCount>2</TotalCount><Product><ProductCode>111</ProductCode><ProductName><![CDATA[나이키 에어 포스 1 07]]></ProductName><ProductPrice>200000</ProductPrice><SalePrice>190000</SalePrice><ProductImage><![CDATA[https://cdn.011st.com/11dims/resize/x80/11src/product/111/B.webp]]></ProductImage><ProductImage300><![CDATA[https://cdn.011st.com/11dims/resize/x300/11src/product/111/B.webp]]></ProductImage300><SellerNick><![CDATA[퀀텍스]]></SellerNick><Seller>quantex</Seller><DetailPageUrl><![CDATA[http://www.11st.co.kr/product/SellerProductDetail.tmall?method=getSellerProductDetail&prdNo=111]]></DetailPageUrl><ReviewCount>5</ReviewCount><BuySatisfy>90</BuySatisfy></Product><Product><ProductCode>222</ProductCode><ProductName><![CDATA[나이키 에어 포스 1 07 화이트]]></ProductName><ProductPrice>180000</ProductPrice><SalePrice></SalePrice><SellerNick><![CDATA[]]></SellerNick><Seller>seller2</Seller><DetailPageUrl><![CDATA[http://www.11st.co.kr/product/SellerProductDetail.tmall?method=getSellerProductDetail&prdNo=222]]></DetailPageUrl><ReviewCount></ReviewCount><BuySatisfy></BuySatisfy></Product></Products></ProductSearchResponse>"""
 
 _ERROR_XML = """<?xml version="1.0" encoding="EUC-KR"?><ProductSearchResponse><Error><Code>003</Code><Message>등록되지 않은 KEY 입니다.</Message></Error></ProductSearchResponse>"""
 
@@ -52,6 +52,18 @@ def test_parse_search_xml_leaves_review_fields_none_when_blank():
 
     assert items[1]["review_count"] is None
     assert items[1]["buy_satisfy"] is None
+
+
+def test_parse_search_xml_prefers_productimage300_thumbnail():
+    items = elevenst.parse_search_xml(_SAMPLE_XML)
+
+    assert items[0]["image_url"] == "https://cdn.011st.com/11dims/resize/x300/11src/product/111/B.webp"
+
+
+def test_parse_search_xml_image_url_none_when_no_image_tags():
+    items = elevenst.parse_search_xml(_SAMPLE_XML)
+
+    assert items[1]["image_url"] is None
 
 
 def test_parse_search_xml_raises_on_error_response():

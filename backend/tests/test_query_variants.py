@@ -21,6 +21,7 @@ def _item(name: str, price: int, code: str = "1") -> ElevenstSearchItem:
         url=f"https://www.11st.co.kr/products/{code}",
         review_count=None,
         buy_satisfy=None,
+        image_url=None,
     )
 
 
