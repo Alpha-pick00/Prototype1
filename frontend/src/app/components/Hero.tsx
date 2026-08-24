@@ -21,6 +21,7 @@ export const Hero = () => {
     sessionPreferences,
     sendMessage,
     selectFacets,
+    searchBroadly,
     retryTurn,
     editTurn,
     handleImageUpload,
@@ -449,6 +450,7 @@ export const Hero = () => {
                                 result={turn.result}
                                 sessionPreferences={sessionPreferences}
                                 onConfirmFacets={(selected) => selectFacets(turn.id, selected)}
+                                onSearchBroadly={() => searchBroadly(turn.id)}
                               />
                               <div className="mt-2 flex items-center gap-2 opacity-0 group-hover/assistant:opacity-100 transition-opacity">
                                 <span className="text-[11px] text-neutral-400 px-1">{formatTime(turn.createdAt)}</span>

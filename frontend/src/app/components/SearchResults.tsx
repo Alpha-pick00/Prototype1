@@ -241,12 +241,16 @@ interface Props {
   // 계정/세션 페르소나에 기록할 수 없다. 다중 선택 지원(2026-08-24)으로 값
   // 하나가 아니라 배열이다 - 같은 facet에서 여러 개를 고를 수 있다(OR로 검색).
   onConfirmFacets: (selected: Record<string, string[]>) => void;
+  // 조건을 하나도 안 고르고 원래 질의 그대로 포괄적으로 검색한다(2026-08-24,
+  // "선택 안해도 그냥 바로 포괄적으로도 검색 가능하게 하고 싶어").
+  onSearchBroadly: () => void;
 }
 
 export const SearchResults = ({
   result,
   sessionPreferences = {},
   onConfirmFacets,
+  onSearchBroadly,
 }: Props) => {
   // AI 상세검색: facet마다 하나씩 고른다. 예전엔 화면에 떠 있는 기준을 전부
   // 골라야만 검색이 실행됐는데(2026-08-13: "상세검색에서 고를때마다 검색하는걸로
@@ -541,7 +545,17 @@ export const SearchResults = ({
           );
         })}
         {displayFacets.length > 0 && (
-          <div className="mb-4 last:mb-0 flex justify-end">
+          <div className="mb-4 last:mb-0 flex justify-end items-center gap-3">
+            {/* 조건 없이 그냥 검색(2026-08-24) - 축을 하나도 안 골라도 원래
+                질의 그대로 포괄적으로 검색할 수 있어야 한다. "검색하기"와
+                달리 선택 여부와 무관하게 항상 눌린다. */}
+            <button
+              type="button"
+              onClick={onSearchBroadly}
+              className="text-sm font-light text-neutral-400 hover:text-neutral-950 transition-colors"
+            >
+              조건 없이 검색
+            </button>
             <button
               onClick={() => onConfirmFacets(effectiveSelectedFacets)}
               disabled={Object.keys(effectiveSelectedFacets).length === 0}

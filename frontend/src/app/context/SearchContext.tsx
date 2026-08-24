@@ -90,6 +90,8 @@ interface SearchContextValue {
   sessionPreferences: Record<string, string>;
   sendMessage: (q: string) => Promise<void>;
   selectFacets: (turnId: string, selected: Record<string, string[]>) => Promise<void>;
+  // 조건을 하나도 안 고르고 원래 질의 그대로 포괄적으로 검색한다(2026-08-24).
+  searchBroadly: (turnId: string) => Promise<void>;
   retryTurn: (turnId: string) => Promise<void>;
   editTurn: (turnId: string, newQuery: string) => Promise<void>;
   handleImageUpload: (file: File) => Promise<void>;
@@ -261,9 +263,15 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     requestQuery: string,
     baseQuery?: string,
     personaOverride?: Record<string, string>,
-    facetAnswers?: Record<string, string[]>
+    facetAnswers?: Record<string, string[]>,
+    forceSkipClarify?: boolean
   ) => {
-    const skipIntentCheck = requestQuery !== (baseQuery ?? requestQuery);
+    // forceSkipClarify(2026-08-24, "카테고리를 선택해야지만 검색할 수 있는데
+    // ... 선택 안해도 그냥 바로 포괄적으로도 검색 가능하게") - AI 상세검색
+    // 카드에서 "그냥 검색하기"를 누른 턴이다. requestQuery === baseQuery라
+    // 아래 skipIntentCheck 추론(문자열 비교)만으로는 "이미 한 축 답한 후속
+    // 턴"과 구분이 안 된다 - 명시적으로 이번 한 번만 애매함 체크를 건너뛴다.
+    const skipIntentCheck = forceSkipClarify || requestQuery !== (baseQuery ?? requestQuery);
 
     try {
       // AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어면 11번가 실측
@@ -385,6 +393,21 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
       if (values.length > 0) personaOverride[label] = values[values.length - 1];
     }
     await runTurn(turn.id, turn.requestQuery, turn.baseQuery, personaOverride, accumulatedFacetAnswers);
+  };
+
+  // AI 상세검색 카드에서 조건을 하나도 안 고르고 "그냥 검색하기"를 누르면
+  // 호출된다(2026-08-24, "선택 안해도 그냥 바로 포괄적으로도 검색 가능하게
+  // 하고 싶어") - 원래 질의 그대로(축 하나도 안 좁힌 채) 검색한다. selectFacets
+  // 와 달리 값이 하나도 없어도 진행해야 하고, runTurn의 애매함 재체크를
+  // forceSkipClarify로 명시적으로 건너뛴다 - 안 그러면 같은 질의로 다시 물어
+  // 똑같은 clarify 카드가 반복돼 사용자가 절대 벗어날 수 없다.
+  const searchBroadly = async (turnId: string) => {
+    const origin = findTurn(turnId);
+    const conversation = conversations.find((c) => c.turns.some((t) => t.id === turnId));
+    if (!origin || !conversation) return;
+    const turn = newTurn(origin.requestQuery, origin.requestQuery, origin.baseQuery, origin.facetAnswers);
+    appendTurn(conversation.id, turn);
+    await runTurn(turn.id, turn.requestQuery, turn.baseQuery, undefined, origin.facetAnswers, true);
   };
 
   const retryTurn = async (turnId: string) => {
@@ -525,6 +548,7 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
         sessionPreferences,
         sendMessage,
         selectFacets,
+        searchBroadly,
         retryTurn,
         editTurn,
         handleImageUpload,
