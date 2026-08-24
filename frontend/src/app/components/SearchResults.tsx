@@ -621,7 +621,19 @@ export const SearchResults = ({
   // 잘라도 가장 관련성 높은 후보가 빠지지 않는다(2026-08-24 사용자 요청 -
   // 후보 전부를 보여주면 카드가 너무 많아 보기 불편함).
   const MAX_OTHER_PROPOSALS = 4;
-  const otherProposals = proposals.filter((p) => p.url !== displayed.url).slice(0, MAX_OTHER_PROPOSALS);
+  let otherProposals = proposals.filter((p) => p.url !== displayed.url).slice(0, MAX_OTHER_PROPOSALS);
+  // 최종 추천(1번)은 관련도 자체는 낮을 수 있다(추천 Agent가 가격/리뷰
+  // 기준으로 고르기 때문) - 다른 후보를 보는 중(isAlternate)에 1번이 상위
+  // 4개 밖으로 밀려나면 "1번으로 돌아갈 번호"가 목록에서 아예 사라진다
+  // (2026-08-24 버그 리포트 - "다시 1번으로 돌아갈 수 있게 번호가 떠야
+  // 하는데 번호가 제대로 안뜨는 것 같다"). isAlternate일 땐 1번을 항상
+  // 강제로 끼워 넣는다.
+  if (isAlternate && !otherProposals.some((p) => p.url === decision.url)) {
+    const decisionProposal = proposals.find((p) => p.url === decision.url);
+    if (decisionProposal) {
+      otherProposals = [decisionProposal, ...otherProposals.slice(0, MAX_OTHER_PROPOSALS - 1)];
+    }
+  }
 
   // 순위 배지(2026-08-24, "메인 추천이랑 다른 후보 번호로 구별하기 쉬웠으면") -
   // url에 고정된 번호를 매겨서, 다른 후보를 눌러 메인 카드에 띄워도(displayed가
@@ -699,7 +711,11 @@ export const SearchResults = ({
                   <button
                     key={g.url}
                     type="button"
-                    onClick={() => setSelectedProposalUrl(g.url)}
+                    // 1번(최종 추천) 자기 자신을 눌렀으면 proposals 목록의
+                    // 평범한 버전이 아니라 진짜 "최종 추천" 상태(decision의
+                    // 원래 reasoning·헤더 라벨)로 돌아가야 한다 - null로
+                    // 리셋하면 displayed가 다시 decision을 가리킨다.
+                    onClick={() => setSelectedProposalUrl(g.url === decision.url ? null : g.url)}
                     className="flex items-start gap-2 text-left rounded-lg -mx-2 px-2 py-2 hover:bg-black/[0.03] transition-colors cursor-pointer"
                   >
                     <ProductThumbnail
@@ -739,7 +755,13 @@ export const SearchResults = ({
                     key={p.url ?? i}
                     type="button"
                     disabled={!isPickable}
-                    onClick={() => isPickable && setSelectedProposalUrl(p.url)}
+                    // 1번(최종 추천) 자기 자신을 눌렀으면 proposals 목록의
+                    // 평범한 버전이 아니라 진짜 "최종 추천" 상태(decision의
+                    // 원래 reasoning·헤더 라벨)로 돌아가야 한다 - null로
+                    // 리셋하면 displayed가 다시 decision을 가리킨다(2026-08-24
+                    // 버그 리포트 - "다른 후보 보고 1번으로 돌아가면 요약본으로
+                    // 뜬다").
+                    onClick={() => isPickable && setSelectedProposalUrl(p.url === decision.url ? null : p.url)}
                     className={`flex items-start gap-2 text-xs text-left rounded-lg -mx-2 px-2 py-1.5 transition-colors ${
                       isPickable ? 'hover:bg-black/[0.03] cursor-pointer' : 'cursor-default'
                     }`}
