@@ -87,7 +87,11 @@ def test_run_elevenst_only_debate_falls_back_to_query_variants_when_no_relevant_
     async def _no_recommend(query, candidates):
         return None
 
+    async def _no_notes(query, candidates):
+        return {}
+
     monkeypatch.setattr(debate.gpt, "recommend_best", _no_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
 
     result = asyncio.run(debate.run_elevenst_only_debate("2프로"))
 

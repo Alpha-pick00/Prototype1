@@ -104,6 +104,13 @@ async def run_elevenst_only_debate(
     최저가 규칙 기반으로 폴백한다. 관련 상품을 하나도 못 찾으면 Groq이
     제안한 대안 표기로 재검색한다(_search_with_query_variants).
 
+    proposals 각각의 이유(reasoning)는 gpt.candidate_notes()가 별도로 채운다
+    (2026-08-24 사용자 요청 - "후보 추천해주는 애들도 추천하는 이유가 있으면
+    좋겠다"). recommend_best와 한 호출에 합쳤더니 출력 토큰이 늘어 평균
+    3.2초 -> 10.3초로 느려졌던 걸(직접 실측) recommend_best와 asyncio.gather로
+    동시에 실행되는 별도 호출로 분리해 완화했다 - 실패하거나 특정 index에
+    이유가 없으면 일반 문구로 안전하게 대체한다.
+
     facet_answers가 있으면(다중 선택) _product_name_matches 재검사를 건너뛴다
     (2026-08-24 버그 리포트, "카테고리를 여러개 고르면 그중에 하나라도
     포함되어 있으면 검색 결과를 가지고 올 수 있게 해야해") - _search_candidates가
@@ -126,10 +133,15 @@ async def run_elevenst_only_debate(
 
     ranked = await _rank_by_relevance(query, relevant)
 
-    recommended = await gpt.recommend_best(query, ranked)
-    candidate_notes: dict[int, str] = {}
+    # recommend_best(메인 선택)와 candidate_notes(다른 후보 각각의 이유)는
+    # 서로 의존하지 않는 별개 작업이라 동시에 실행한다 - 순서대로 부르면
+    # 두 호출 시간이 그대로 합산된다.
+    recommended, notes = await asyncio.gather(
+        gpt.recommend_best(query, ranked),
+        gpt.candidate_notes(query, ranked),
+    )
     if recommended is not None:
-        index, llm_reasoning, candidate_notes = recommended
+        index, llm_reasoning = recommended
         best = ranked[index]
         # 프롬프트로 "내부 목록 번호를 언급하지 말라"고 지시해도(RECOMMEND_INSTRUCTIONS)
         # DeepSeek/Qwen류 모델은 프롬프트 지시를 놓칠 때가 있다(이 코드베이스에서
@@ -157,15 +169,10 @@ async def run_elevenst_only_debate(
         price_source="elevenst_offer",
         image_url=best.get("image_url"),
     )
-    # "다른 후보" 카드도 전부 같은 문구("관련도순 - 함께 볼만한 상품")만 달고
-    # 있으면 클릭해도 실질적인 설명이 없는 것처럼 느껴진다(2026-08-24 사용자
-    # 피드백) - 추천 Agent가 함께 준 후보별 이유(candidate_notes)가 있으면
-    # 그걸 쓰고, 없거나(응답 실패/해당 index 누락) 순번이 새어나오면 기존
-    # 일반 문구로 안전하게 대체한다.
     fallback_note = "11번가 오픈 API 검증 결과 (관련도순 - 함께 볼만한 상품)"
     proposals = []
     for i, it in enumerate(ranked):
-        note = candidate_notes.get(i, "")
+        note = notes.get(i, "")
         if _REASONING_LEAKS_INTERNAL_INDEX_RE.search(note):
             note = ""
         proposals.append(

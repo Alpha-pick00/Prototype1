@@ -90,6 +90,10 @@ def test_rank_by_relevance_falls_back_to_original_order_when_embedding_fails(mon
     assert [it["product_code"] for it in ranked] == ["1", "2"]
 
 
+async def _no_notes(query, candidates):
+    return {}
+
+
 def test_run_elevenst_only_debate_uses_recommend_agent_pick_over_cheapest(monkeypatch):
     """추천 Agent가 최저가가 아닌 후보를 골라도(리뷰/구매만족도 등을 근거로)
     그 선택을 최종 추천으로 써야 한다 - 무조건 최저가를 강제하지 않는다."""
@@ -106,9 +110,10 @@ def test_run_elevenst_only_debate_uses_recommend_agent_pick_over_cheapest(monkey
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
     async def _fake_recommend(query, candidates):
-        return 1, "리뷰가 훨씬 많아서 더 신뢰할 만함", {}
+        return 1, "리뷰가 훨씬 많아서 더 신뢰할 만함"
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
 
     result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
 
@@ -136,9 +141,10 @@ def test_run_elevenst_only_debate_drops_reasoning_that_leaks_internal_index(monk
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
     async def _fake_recommend(query, candidates):
-        return 1, "index 1의 상품이 다른 후보(0)보다 리뷰가 많아서 선택함", {}
+        return 1, "index 1의 상품이 다른 후보(0)보다 리뷰가 많아서 선택함"
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
 
     result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
 
@@ -147,9 +153,11 @@ def test_run_elevenst_only_debate_drops_reasoning_that_leaks_internal_index(monk
 
 
 def test_run_elevenst_only_debate_uses_candidate_notes_for_proposal_reasoning(monkeypatch):
-    """"다른 후보"로 노출되는 각 Proposal이 추천 Agent가 준 개별 이유(notes)를
-    쓰는지 확인한다 - 전부 같은 문구만 달려 있으면 클릭해도 설명이 없는
-    것처럼 느껴진다는 사용자 피드백(2026-08-24) 회귀 테스트."""
+    """"다른 후보"로 노출되는 각 Proposal이 candidate_notes가 준 개별
+    이유를 쓰는지 확인한다 - 전부 같은 문구만 달려 있으면 클릭해도 설명이
+    없는 것처럼 느껴진다는 사용자 피드백(2026-08-24) 회귀 테스트.
+    recommend_best와 candidate_notes는 asyncio.gather로 동시에 호출되므로
+    서로 독립적인 별도 함수로 monkeypatch한다."""
 
     async def _fake_search(query, limit=10):
         return [_item("찾는 상품 A", 1000, "1"), _item("찾는 상품 B", 2000, "2")]
@@ -163,9 +171,13 @@ def test_run_elevenst_only_debate_uses_candidate_notes_for_proposal_reasoning(mo
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
     async def _fake_recommend(query, candidates):
-        return 0, "가장 저렴함", {0: "가장 저렴하고 리뷰도 많음", 1: "용량이 더 커서 대용량이 필요하면 적합"}
+        return 0, "가장 저렴함"
+
+    async def _fake_notes(query, candidates):
+        return {0: "가장 저렴하고 리뷰도 많음", 1: "용량이 더 커서 대용량이 필요하면 적합"}
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _fake_notes)
 
     result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
 
@@ -187,9 +199,13 @@ def test_run_elevenst_only_debate_falls_back_to_generic_note_when_note_leaks_ind
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
     async def _fake_recommend(query, candidates):
-        return 0, "가장 저렴함", {1: "index 0보다 비쌈"}
+        return 0, "가장 저렴함"
+
+    async def _fake_notes(query, candidates):
+        return {1: "index 0보다 비쌈"}
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _fake_notes)
 
     result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
 
@@ -216,9 +232,10 @@ def test_run_elevenst_only_debate_propagates_image_url_to_decision_and_proposals
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
     async def _fake_recommend(query, candidates):
-        return 0, "가장 저렴함", {}
+        return 0, "가장 저렴함"
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
 
     result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
 
@@ -244,6 +261,7 @@ def test_run_elevenst_only_debate_falls_back_to_cheapest_when_recommend_agent_fa
         return None
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
 
     result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
 
@@ -307,20 +325,17 @@ def test_recommend_best_returns_index_and_reasoning_on_success(monkeypatch):
 
     result = asyncio.run(gpt.recommend_best("질의", [{"product_name": "상품", "price_krw": 1000, "seller": "s"}]))
 
-    assert result == (0, "리뷰가 많음", {})
+    assert result == (0, "리뷰가 많음")
 
 
-def test_recommend_best_parses_notes_with_string_keys_into_int_keys(monkeypatch):
+def test_candidate_notes_parses_string_keys_into_int_keys(monkeypatch):
     """LLM은 JSON으로 응답하므로 notes의 키는 항상 문자열("0", "1")이다 -
     호출부(app.debate)가 ranked 리스트를 정수 인덱스로 찾으니 int로 변환해야
     한다."""
     from app.agents import gpt
 
     class _FakeMessage:
-        content = (
-            '{"index": 0, "reasoning": "리뷰가 많음", '
-            '"notes": {"0": "리뷰 많고 저렴함", "1": "가성비 좋음"}}'
-        )
+        content = '{"notes": {"0": "리뷰 많고 저렴함", "1": "가성비 좋음"}}'
 
     class _FakeChoice:
         message = _FakeMessage()
@@ -344,16 +359,16 @@ def test_recommend_best_parses_notes_with_string_keys_into_int_keys(monkeypatch)
         {"product_name": "상품A", "price_krw": 1000, "seller": "s"},
         {"product_name": "상품B", "price_krw": 2000, "seller": "s"},
     ]
-    result = asyncio.run(gpt.recommend_best("질의", candidates))
+    result = asyncio.run(gpt.candidate_notes("질의", candidates))
 
-    assert result == (0, "리뷰가 많음", {0: "리뷰 많고 저렴함", 1: "가성비 좋음"})
+    assert result == {0: "리뷰 많고 저렴함", 1: "가성비 좋음"}
 
 
-def test_recommend_best_drops_out_of_range_note_indices(monkeypatch):
+def test_candidate_notes_drops_out_of_range_indices(monkeypatch):
     from app.agents import gpt
 
     class _FakeMessage:
-        content = '{"index": 0, "reasoning": "리뷰가 많음", "notes": {"0": "괜찮음", "9": "범위 밖"}}'
+        content = '{"notes": {"0": "괜찮음", "9": "범위 밖"}}'
 
     class _FakeChoice:
         message = _FakeMessage()
@@ -373,6 +388,34 @@ def test_recommend_best_drops_out_of_range_note_indices(monkeypatch):
 
     monkeypatch.setattr(gpt, "_client", lambda: _FakeClient())
 
-    result = asyncio.run(gpt.recommend_best("질의", [{"product_name": "상품", "price_krw": 1000, "seller": "s"}]))
+    result = asyncio.run(gpt.candidate_notes("질의", [{"product_name": "상품", "price_krw": 1000, "seller": "s"}]))
 
-    assert result == (0, "리뷰가 많음", {0: "괜찮음"})
+    assert result == {0: "괜찮음"}
+
+
+def test_candidate_notes_returns_empty_dict_on_failure(monkeypatch):
+    from app.agents import gpt
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            raise RuntimeError("API 오류")
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr(gpt, "_client", lambda: _FakeClient())
+
+    result = asyncio.run(gpt.candidate_notes("질의", [{"product_name": "상품", "price_krw": 1000, "seller": "s"}]))
+
+    assert result == {}
+
+
+def test_candidate_notes_returns_empty_dict_for_no_candidates():
+    from app.agents import gpt
+
+    result = asyncio.run(gpt.candidate_notes("질의", []))
+
+    assert result == {}

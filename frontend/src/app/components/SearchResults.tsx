@@ -751,10 +751,7 @@ export const SearchResults = ({
                       rank={p.url ? rankByUrl[p.url] : undefined}
                     />
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5">
-                        <VerifiedBadge verified={p.verified} />
-                        <ProposedByChips proposedBy={p.proposed_by} />
-                      </div>
+                      <ProposedByChips proposedBy={p.proposed_by} />
                       <p className="mt-1 font-light text-neutral-600 truncate">
                         {p.error ? p.error : `${p.product_name} · ${p.price || '가격 미확인'}`}
                       </p>

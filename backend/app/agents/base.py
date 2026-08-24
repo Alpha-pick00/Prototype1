@@ -10,29 +10,54 @@ RECOMMEND_INSTRUCTIONS = (
     "관련도 순으로 정렬돼 있습니다. "
     "반드시 아래 후보 목록의 index 중 하나를 골라 JSON으로만 답하세요. 다른 "
     "텍스트나 코드펜스를 덧붙이지 마세요.\n\n"
-    "reasoning과 notes는 전부 사용자에게 그대로 노출되는 문장입니다 - 아래 "
-    "후보 목록의 [0], [1] 같은 대괄호 번호나 'index 3'처럼 내부 목록 순번을 "
-    "절대 언급하지 마세요(사용자는 그 번호 매김을 본 적이 없어 무슨 뜻인지 "
-    "모릅니다). 다른 후보를 언급해야 하면 반드시 그 상품명으로 지칭하세요.\n\n"
-    "reasoning: 고른 상품(index)이 왜 좋은지 1~2문장으로 간결하게.\n"
-    "notes: 아래 \"이유가 필요한 후보\" 목록에 있는 각 index에 대해, 그 "
-    "상품이 어떤 사람에게 괜찮은 선택인지(가격/리뷰/구매만족도/판매자 근거로) "
-    "1문장씩. 고른 index도 이 목록에 있으면 마찬가지로 채우세요.\n\n"
-    '{"index": 0, "reasoning": "...", "notes": {"0": "...", "2": "..."}}'
+    "reasoning은 사용자에게 그대로 노출되는 문장입니다 - 아래 후보 목록의 "
+    "[0], [1] 같은 대괄호 번호나 'index 3'처럼 내부 목록 순번을 절대 언급하지 "
+    "마세요(사용자는 그 번호 매김을 본 적이 없어 무슨 뜻인지 모릅니다). 다른 "
+    "후보를 언급해야 하면 반드시 그 상품명으로 지칭하세요. 고른 상품이 왜 "
+    "좋은지만 1~2문장으로 간결하게 쓰세요.\n\n"
+    '{"index": 0, "reasoning": "..."}'
 )
 
 
-def build_recommend_prompt(query: str, candidates: list[dict], note_indices: list[int]) -> str:
+def build_recommend_prompt(query: str, candidates: list[dict]) -> str:
     lines = [
         f"[{i}] {c['product_name']} / {c['price_krw']:,}원 / 판매자: {c['seller']} / "
         f"리뷰 {c.get('review_count')}건 / 구매만족도 {c.get('buy_satisfy')}"
         for i, c in enumerate(candidates)
     ]
     candidates_block = "\n".join(lines) or "(후보 없음)"
-    notes_line = f"이유가 필요한 후보: {note_indices}" if note_indices else ""
-    return (
-        f"{RECOMMEND_INSTRUCTIONS}\n\n사용자 질의: {query}\n\n후보:\n{candidates_block}\n\n{notes_line}"
-    )
+    return f"{RECOMMEND_INSTRUCTIONS}\n\n사용자 질의: {query}\n\n후보:\n{candidates_block}"
+
+
+# 2026-08-24: 애초에 recommend_best 응답 하나에 index 선택 + 후보별 개별
+# 이유(notes)를 다 얹었더니 출력 토큰이 늘어 평균 3.2초 -> 10.3초(최대
+# 20초)로 느려졌다(실측). index 선택과 개별 이유 생성은 서로 의존하지
+# 않는 별개 작업이라, 프롬프트/호출을 분리해 app.debate가 asyncio.gather로
+# 동시에 실행하게 한다 - 전체 대기시간이 (두 호출 합)이 아니라 (더 느린
+# 쪽 하나)로 줄어드는 걸 노린다. 이 프롬프트는 그래서 최대한 가볍게
+# 유지한다(선택 이유는 필요 없고 각 후보 1문장씩만).
+CANDIDATE_NOTES_INSTRUCTIONS = (
+    "아래는 전부 실제 검색으로 존재가 확인된 쇼핑 후보입니다. 각 후보가 "
+    "어떤 사람에게 괜찮은 선택인지 가격/리뷰/구매만족도/판매자 근거로 "
+    "1문장씩 설명하세요.\n\n"
+    "이 문장은 사용자에게 그대로 노출됩니다 - 아래 후보 목록의 [0], [1] "
+    "같은 대괄호 번호나 'index 3'처럼 내부 목록 순번을 절대 언급하지 "
+    "마세요(사용자는 그 번호 매김을 본 적이 없습니다). 다른 후보를 "
+    "언급해야 하면 반드시 그 상품명으로 지칭하세요.\n\n"
+    "반드시 JSON으로만 답하세요. 다른 텍스트나 코드펜스를 덧붙이지 마세요.\n\n"
+    '{"notes": {"0": "...", "2": "..."}}'
+)
+
+
+def build_candidate_notes_prompt(query: str, candidates: list[dict], note_indices: list[int]) -> str:
+    lines = [
+        f"[{i}] {c['product_name']} / {c['price_krw']:,}원 / 판매자: {c['seller']} / "
+        f"리뷰 {c.get('review_count')}건 / 구매만족도 {c.get('buy_satisfy')}"
+        for i, c in enumerate(candidates)
+        if i in note_indices
+    ]
+    candidates_block = "\n".join(lines) or "(후보 없음)"
+    return f"{CANDIDATE_NOTES_INSTRUCTIONS}\n\n사용자 질의: {query}\n\n이유가 필요한 후보:\n{candidates_block}"
 
 
 FACET_CLARIFY_INSTRUCTIONS = (
