@@ -12,8 +12,16 @@ BULK_SPEC_PATTERN = re.compile(
     f"{_COUNT_UNIT_PATTERN.pattern}|{_VOLUME_UNIT_PATTERN.pattern}"
 )
 
-# "사고싶다"류 구매 의도 문구. 역시 근사치 휴리스틱.
-BUY_INTENT_PATTERN = re.compile(r"(사고\s*싶|사려고|구매하고\s*싶|구매하려|사줘|살래)")
+# "사고싶다"류 구매 의도 문구 + "찾아줘"/"추천해줘"류 검색 요청 문구. 역시 근사치
+# 휴리스틱이다(2026-08-25, "사고싶어, 구매하고 싶어, 찾아줘 등과 같이 상품명 뒤에
+# 뭔가를 찾는 내용이 있어도 그 상품을 찾아서 추천해줄 수 있게 하고 싶어") -
+# "찾아줘"류도 "사고싶어"류와 마찬가지로 그대로 11번가 keyword로 넘기면 검색/
+# 그라운딩이 실패하므로 looks_conversational_query를 거쳐 refine_query로 정제돼야 한다.
+BUY_INTENT_PATTERN = re.compile(
+    r"(사고\s*싶|사려고|구매하고\s*싶|구매하려|사줘|살래|"
+    r"찾아\s*(줘|줄래|주세요|주라|볼래)|찾고\s*싶|"
+    r"추천해\s*(줘|줄래|주세요|주라)|골라\s*(줘|줄래|주세요|주라))"
+)
 
 
 def is_bulk_query(query: str) -> bool:
