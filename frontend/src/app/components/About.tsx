@@ -5,16 +5,26 @@ import weCraftImage from '../../assets/about/we-craft.jpg';
 import qwenLogo from '../../assets/about/logos/qwen.svg';
 import deepseekLogo from '../../assets/about/logos/deepseek.svg';
 import awsLogo from '../../assets/about/logos/aws.svg';
+import elevenstLogo from '../../assets/about/logos/11st.png';
 
 // "gpt" 에이전트 슬롯은 Qwen(DashScope)이 담당한다(backend/app/agents/gpt.py
 // 참고). qwen.svg는 lobehub/lobe-icons(MIT, AI 서비스 attribution 용도로 만든
 // 오픈소스 아이콘셋)에서 가져온 것 - Qwen 공식 자산이 아니라 커뮤니티 아이콘이다.
-// 11번가·HCX는 여기(로고 마퀴)에는 일부러 안 넣는다(2026-08-25 논의) - 실제
-// 공식 파트너십 없이 회사 로고(상표)를 "Powered by"로 올리면 관계를 과장해
-// 보이게 할 위험이 있다(AWS/Qwen/DeepSeek는 API 사용자의 로고 표기를 비교적
-// 관대하게 허용하는 편이라 유지). 11번가/HCX 언급은 이미 How We Curate·
-// Services 섹션에 텍스트로만 들어가 있다.
+//
+// 11st.png는 11번가 공식 브랜드 가이드(design.11stcorp.com/brand/logos,
+// 2026-08-25 확인)에서 받은 "11STREET Identity" 스크린용 배포 자산 그대로다 -
+// 다나와 시절부터 있던 미사용 11st.webp(출처 불명)는 안 쓴다. Black/White/
+// 11Gradiant 세 버전 중 11Gradiant(가이드가 명시한 메인 컬러)를 쓴다 - 이
+// 마퀴의 다른 로고들처럼 평소엔 그레이스케일로 죽어있다가 호버하면 원래
+// 색이 살아나는데, Black을 쓰면 그레이스케일이든 아니든 그냥 검정이라 이
+// 호버 효과가 다른 로고들과 다르게 안 먹혔다. 가이드의 금지규정(색상·형태·
+// 비례 변형 금지, 약칭 "11ST"/"11st" 단독 사용 금지)에 따라 이 파일을
+// 리컬러/리사이즈 없이 원본 그대로만 쓴다. HCX는
+// 여기엔 안 넣는다 - 이쪽은 공식 브랜드 가이드/배포 자산을 못 찾았고, 실제
+// 공식 파트너십 없이 로고(상표)만 올리면 관계를 과장해 보이는 위험이 여전히
+// 남아있다(HCX 언급은 How We Curate 섹션에 텍스트로만 유지).
 const poweredByClients = [
+  { name: '11번가', url: 'https://www.11st.co.kr', logo: elevenstLogo },
   { name: 'Qwen', url: 'https://qwenlm.ai', logo: qwenLogo },
   { name: 'DeepSeek', url: 'https://www.deepseek.com', logo: deepseekLogo },
   { name: 'Amazon AWS', url: 'https://aws.amazon.com', logo: awsLogo },
