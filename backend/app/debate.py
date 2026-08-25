@@ -10,7 +10,7 @@ from . import facet_cache
 from . import llm_cache
 from . import price_table as price_table_module
 from .agents import deepseek, gpt, hcx
-from .intent import is_non_product_chitchat, needs_clarification
+from .intent import is_non_product_chitchat, looks_conversational_query, needs_clarification
 from .schemas import (
     ClarifyFacet,
     ClarifyOptions,
@@ -92,23 +92,43 @@ async def _search_with_query_variants(query: str) -> list[elevenst.ElevenstSearc
 _REASONING_LEAKS_INTERNAL_INDEX_RE = re.compile(r"\bindex\b|\[\d+\]", re.IGNORECASE)
 
 
+async def _maybe_refine_query(query: str) -> str:
+    """looks_conversational_query()에 걸리는 질의("저렴한 아기 간식을 사고
+    싶어" 등)만 골라 gpt.refine_query로 정제한다(2026-08-24 사용자 리포트 -
+    자연어 질의를 그대로 11번가 keyword로 넘기면 검색이 실패했다). 이미
+    짧고 깨끗한 검색어는 이 휴리스틱에 안 걸려 정제 자체(LLM 호출)를
+    건너뛴다. 정제 실패(키 없음·API 오류·빈 응답)하면 원래 질의 그대로
+    돌려준다 - 정제 실패가 검색 자체를 막으면 안 된다."""
+    if not looks_conversational_query(query):
+        return query
+    refined = await gpt.refine_query(query)
+    return refined or query
+
+
 async def _search_and_rank_candidates(
     query: str, base_query: str | None, facet_answers: dict[str, list[str]] | None
-) -> list[elevenst.ElevenstSearchItem]:
-    """검색 -> 관련성 필터 -> (0건이면 대안 표기 재검색) -> 관련도순 정렬까지,
-    run_elevenst_only_debate()와 그 스트리밍 버전이 공유하는 앞부분이다.
-    관련 상품을 하나도 못 찾으면 RuntimeError."""
+) -> tuple[str, list[elevenst.ElevenstSearchItem]]:
+    """검색 -> 관련성 필터 -> (0건이면 임베딩 의미 유사도 구제 -> 그래도 0건이면
+    대안 표기 재검색) -> 관련도순 정렬까지, run_elevenst_only_debate()와 그
+    스트리밍 버전이 공유하는 앞부분이다. 질의가 대화체면(_maybe_refine_query)
+    검색 전에 먼저 정제한다 - 반환하는 질의는 호출부가 이후 추천 Agent
+    프롬프트/에러 메시지에도 일관되게 써야 한다(원래 질의로 검색하고 정제된
+    질의로 설명하면 앞뒤가 안 맞는다). 관련 상품을 하나도 못 찾으면
+    RuntimeError."""
+    query = await _maybe_refine_query(query)
     items = await _search_candidates(query, base_query, facet_answers)
     relevant = (
         items
         if facet_answers
         else [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
     )
+    if not relevant and not facet_answers:
+        relevant = await price_table_module.semantic_relevance_fallback(query, items)
     if not relevant:
         relevant = await _search_with_query_variants(query)
     if not relevant:
-        raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했다.")
-    return await _rank_by_relevance(query, relevant)
+        raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다.")
+    return query, await _rank_by_relevance(query, relevant)
 
 
 def _build_decision(
@@ -171,6 +191,8 @@ def _build_proposals(ranked: list[elevenst.ElevenstSearchItem], notes: dict[int,
                 reasoning=note or _FALLBACK_PROPOSAL_NOTE,
                 verified=True,
                 image_url=it.get("image_url"),
+                review_count=it.get("review_count"),
+                buy_satisfy=it.get("buy_satisfy"),
             )
         )
     return proposals
@@ -204,7 +226,7 @@ async def run_elevenst_only_debate(
     family(갤럭시S#)의 값 집합이 다르다"고 오판해 둘 중 하나만 있는 상품을
     전부 걸러내 버렸다(실측 확인) - OR로 고른 걸 사실상 AND로 요구하는
     버그였다."""
-    ranked = await _search_and_rank_candidates(query, base_query, facet_answers)
+    query, ranked = await _search_and_rank_candidates(query, base_query, facet_answers)
 
     # recommend_best(메인 선택)와 candidate_notes(다른 후보 각각의 이유)는
     # 서로 의존하지 않는 별개 작업이라 동시에 실행한다 - 순서대로 부르면
@@ -236,7 +258,7 @@ async def run_elevenst_only_debate_stream(
     줄어든다."""
     yield {"type": "status", "stage": "searching"}
     try:
-        ranked = await _search_and_rank_candidates(query, base_query, facet_answers)
+        query, ranked = await _search_and_rank_candidates(query, base_query, facet_answers)
     except RuntimeError as exc:
         yield {"type": "error", "message": str(exc)}
         return
@@ -740,6 +762,12 @@ async def check_clarify_facets(
     타게 된다. 매치 안 되면 None이라 기존 동작 그대로 이어진다."""
     if not needs_clarification(query) or is_non_product_chitchat(query):
         return ClarifyResponse(query=query, options=ClarifyOptions())
+
+    # 2026-08-24 - "안녕 나 컵을 사고싶어"처럼 대화체로 감싼 질의는(짧아서
+    # 프론트 looksAmbiguous()에 걸려 이 경로로 먼저 온다) 정제 없이 그대로
+    # 검색하면 11번가 검색도 facet 추출도 실패한다(run_elevenst_only_debate*와
+    # 같은 이유 - _maybe_refine_query 참고).
+    query = await _maybe_refine_query(query)
 
     static_facets = facet_cache.lookup(query)
     if static_facets is not None:

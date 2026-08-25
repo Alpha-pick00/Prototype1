@@ -16,7 +16,7 @@ from app.debate import (
     check_clarify_facets,
     run_elevenst_only_debate_stream,
 )
-from app.intent import is_non_product_chitchat, needs_clarification
+from app.intent import is_non_product_chitchat, looks_conversational_query, needs_clarification
 from app.main import app
 from app.schemas import ClarifyFacet
 
@@ -107,7 +107,55 @@ def test_is_non_product_chitchat_false_for_buy_intent_even_with_chitchat_shape()
     assert is_non_product_chitchat("이거 진짜 사고 싶은데 뭐가 좋을까") is False
 
 
+# -- intent.looks_conversational_query: 대화체 질의 감지(2026-08-24) --------------
+
+
+def test_looks_conversational_query_true_for_buy_intent_sentence():
+    # 사용자 리포트 원문 - 자연어 문장 그대로 11번가 keyword로 넘기면 검색이 실패했다.
+    assert looks_conversational_query("저렴한 아기 간식을 사고 싶어") is True
+
+
+def test_looks_conversational_query_true_for_greeting_prefix_with_content():
+    assert looks_conversational_query("안녕 나 컵을 사고싶어") is True
+    assert looks_conversational_query("안녕하세요 카메라 좀 추천해주세요") is True
+
+
+def test_looks_conversational_query_false_for_clean_short_query():
+    # 이미 짧고 깨끗한 검색어는 정제(LLM 호출) 자체를 건너뛰어야 한다.
+    assert looks_conversational_query("음료수") is False
+    assert looks_conversational_query("아이폰 15 프로") is False
+
+
+def test_looks_conversational_query_false_for_bare_greeting_only():
+    # 인사말 하나뿐인 순수 잡담은 is_non_product_chitchat이 이미 앞단에서
+    # 걸러내므로 이 함수가 신경 쓸 필요 없다(뒤에 내용이 없으면 False).
+    assert looks_conversational_query("안녕하세요") is False
+
+
 # -- 회귀: 잡담 입력은 검색/LLM 호출 없이 즉시 실패한다(속도 개선) -----------------
+
+
+def test_check_clarify_facets_refines_conversational_query_before_search(monkeypatch):
+    """2026-08-24 사용자 리포트 - "안녕 나 컵을 사고싶어"처럼 프론트
+    looksAmbiguous()에 걸릴 만큼 짧은 대화체 질의는 이 경로로 먼저 오는데,
+    정제 없이 그대로 검색하면 11번가 검색도 facet 추출도 실패한다."""
+    seen_search_query = {}
+
+    async def _fake_search(query, limit=3):
+        seen_search_query["query"] = query
+        return []
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _fake_refine(query):
+        return "컵"
+
+    monkeypatch.setattr("app.debate.gpt.refine_query", _fake_refine)
+
+    result = asyncio.run(check_clarify_facets("안녕 나 컵을 사고싶어"))
+
+    assert seen_search_query["query"] == "컵"
+    assert result.query == "컵"
 
 
 def test_check_clarify_facets_returns_empty_immediately_for_greeting(monkeypatch):
@@ -1358,5 +1406,5 @@ def test_run_elevenst_only_debate_stream_never_calls_deepseek_facets_even_for_sh
 
     assert events == [
         {"type": "status", "stage": "searching"},
-        {"type": "error", "message": "11번가에서 '음료수'에 대해 관련성 있는 상품을 찾지 못했다."},
+        {"type": "error", "message": "11번가에서 '음료수'에 대해 관련성 있는 상품을 찾지 못했습니다."},
     ]

@@ -1,7 +1,7 @@
 from openai import AsyncOpenAI
 
 from ..config import settings
-from .base import build_candidate_notes_prompt, build_recommend_prompt, parse_json_object
+from .base import build_candidate_notes_prompt, build_recommend_prompt, build_refine_query_prompt, parse_json_object
 
 # 이 모듈이 담당하는 에이전트 슬롯은 스키마/프론트엔드/테스트 전반에서
 # agent="gpt"로 식별된다(파일명·함수명도 그대로) - 하지만 실제로 호출하는
@@ -38,6 +38,31 @@ def _client() -> AsyncOpenAI:
 # False}를 주면 2초로 줄어든다). 이 프로젝트가 쓰는 프롬프트는 전부 JSON 한
 # 덩어리만 필요해서 추론 과정 자체가 필요 없다 - 이 모듈의 모든 호출에 끈다.
 _DISABLE_THINKING = {"enable_thinking": False}
+
+
+async def refine_query(query: str) -> str | None:
+    """app.intent.looks_conversational_query()에 걸린 질의("저렴한 아기 간식을
+    사고 싶어" 등)에서 인사말·구매 의도 표현을 걷어내고 실제 상품명(또는
+    상품 종류)만 남긴다(2026-08-24 사용자 리포트 - 정제 없이 그대로 11번가
+    keyword로 넘어가 검색이 실패했다). 실패(키 없음·API 오류·빈 결과)하면
+    None - 호출부가 원래 질의 그대로 검색을 진행한다(정제 실패가 검색
+    자체를 막으면 안 된다, app.embeddings.embed와 같은 폴백 원칙)."""
+    stripped = query.strip()
+    if not stripped:
+        return None
+    try:
+        client = _client()
+        response = await client.chat.completions.create(
+            model=settings.qwen_model,
+            messages=[{"role": "user", "content": build_refine_query_prompt(stripped)}],
+            response_format={"type": "json_object"},
+            extra_body=_DISABLE_THINKING,
+        )
+        data = parse_json_object(response.choices[0].message.content or "")
+        refined = str(data.get("query") or "").strip()
+        return refined or None
+    except Exception:
+        return None
 
 
 async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str] | None:

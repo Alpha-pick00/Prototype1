@@ -182,6 +182,28 @@ def build_facet_clarify_prompt_for_labels(
     return f"{instructions}\n\n사용자 질의: {query}\n\n검색 결과 상품명:\n{names_block}"
 
 
+# 2026-08-24 - looks_conversational_query()에 걸린 질의("저렴한 아기 간식을
+# 사고 싶어" 등)를 실제 11번가 검색에 쓸 수 있는 상품명(또는 상품 종류)만
+# 남기도록 정제한다.
+REFINE_QUERY_INSTRUCTIONS = (
+    "당신은 사용자의 쇼핑 검색어를 실제 쇼핑몰 검색에 더 유리하게 다듬는 에이전트입니다. "
+    "질의가 이미 구체적이면(브랜드·모델명·용량 등이 명확하면) 그대로 반환하세요. "
+    "모호한 표현(예: '그거', '요즘 유행하는')이 있으면 검색어에서 제거하고, "
+    "질의에 이미 암시된 브랜드·스펙·용량이 있다면 명시적인 키워드로 풀어 쓰세요. "
+    "질의가 '안녕 나 컵을 사고싶어', '저렴한 아기 간식을 사고 싶어'처럼 인사말이나 "
+    "'~하고 싶어/~하려고요/~해주세요' 같은 대화체 문장으로 감싸져 있으면, 인사말·대명사·조사· "
+    "구매 의도 표현을 전부 걷어내고 실제로 찾는 상품명(또는 상품 종류, 가격 조건 포함)만 검색어로 남기세요 "
+    "(예: '안녕 나 컵을 사고싶어' → '컵', '저렴한 아기 간식을 사고 싶어' → '저렴한 아기 간식'). "
+    "검색어에 없는 브랜드나 상품 정보를 새로 지어내지 마세요 — 원래 의미를 벗어나면 안 됩니다. "
+    "반드시 아래 JSON 형식으로만 답하세요. 다른 텍스트를 덧붙이지 마세요.\n\n"
+    '{"query": "..."}'
+)
+
+
+def build_refine_query_prompt(query: str) -> str:
+    return f"{REFINE_QUERY_INSTRUCTIONS}\n\n사용자 질의: {query}"
+
+
 def parse_json_object(text: str) -> dict:
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:

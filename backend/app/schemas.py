@@ -29,6 +29,12 @@ class Proposal(BaseModel):
     # 2026-08-24: 11번가 API 응답에도 ProductImage300 필드가 있는 걸 확인해
     # fetchers/elevenst.py에서 다시 파싱, app.debate가 채워준다.
     image_url: str | None = None
+    # 2026-08-24 - "만족도 최고" 배지를 프론트에서 계산하기 위해 노출한다
+    # (백엔드가 승자를 미리 정해서 주지 않는 이유: 프론트가 이미 decision/
+    # proposals를 다 갖고 있고, 순위 배지(rankByUrl)도 같은 방식으로
+    # 프론트에서 계산하고 있어 일관성을 맞췄다).
+    review_count: int | None = None
+    buy_satisfy: int | None = None
     reasoning: str | None = None
     error: str | None = None
     verified: bool | None = None

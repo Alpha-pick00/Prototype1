@@ -9,15 +9,22 @@ from app import debate
 from fetchers.elevenst import ElevenstSearchItem
 
 
-def _item(name: str, price: int, code: str = "1", image_url: str | None = None) -> ElevenstSearchItem:
+def _item(
+    name: str,
+    price: int,
+    code: str = "1",
+    image_url: str | None = None,
+    review_count: int | None = None,
+    buy_satisfy: int | None = None,
+) -> ElevenstSearchItem:
     return ElevenstSearchItem(
         product_code=code,
         product_name=name,
         price_krw=price,
         seller="판매자",
         url=f"https://www.11st.co.kr/products/{code}",
-        review_count=None,
-        buy_satisfy=None,
+        review_count=review_count,
+        buy_satisfy=buy_satisfy,
         image_url=image_url,
     )
 
@@ -247,6 +254,37 @@ def test_run_elevenst_only_debate_propagates_image_url_to_decision_and_proposals
     by_code = {p.url: p.image_url for p in result.proposals}
     assert by_code["https://www.11st.co.kr/products/1"] == "https://cdn.011st.com/a.webp"
     assert by_code["https://www.11st.co.kr/products/2"] == "https://cdn.011st.com/b.webp"
+
+
+def test_run_elevenst_only_debate_propagates_review_count_and_buy_satisfy_to_proposals(monkeypatch):
+    """프론트가 "만족도 최고" 배지를 계산하려면(2026-08-24, 사용자 요청)
+    review_count/buy_satisfy가 Proposal까지 전달돼야 한다."""
+
+    async def _fake_search(query, limit=10):
+        return [
+            _item("찾는 상품 A", 1000, "1", review_count=5, buy_satisfy=90),
+            _item("찾는 상품 B", 2000, "2", review_count=None, buy_satisfy=None),
+        ]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
+
+    async def _fake_embed(texts):
+        return None
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _fake_recommend(query, candidates):
+        return 0, "가장 저렴함"
+
+    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
+
+    result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
+
+    by_name = {p.product_name: (p.review_count, p.buy_satisfy) for p in result.proposals}
+    assert by_name["찾는 상품 A"] == (5, 90)
+    assert by_name["찾는 상품 B"] == (None, None)
 
 
 def test_run_elevenst_only_debate_falls_back_to_cheapest_when_recommend_agent_fails(monkeypatch):
@@ -509,3 +547,208 @@ def test_stream_skips_notes_event_when_candidate_notes_come_back_empty(monkeypat
     events = asyncio.run(_collect_stream("찾는 상품"))
 
     assert [e["type"] for e in events] == ["status", "final"]
+
+
+def test_refine_query_returns_cleaned_query_on_success(monkeypatch):
+    """2026-08-24 사용자 리포트 - "저렴한 아기 간식을 사고 싶어"처럼 대화체
+    질의를 그대로 11번가 keyword로 넘기면 검색이 실패한다."""
+    from app.agents import gpt
+
+    class _FakeMessage:
+        content = '{"query": "저렴한 아기 간식"}'
+
+    class _FakeChoice:
+        message = _FakeMessage()
+
+    class _FakeResponse:
+        choices = [_FakeChoice()]
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            return _FakeResponse()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr(gpt, "_client", lambda: _FakeClient())
+
+    result = asyncio.run(gpt.refine_query("저렴한 아기 간식을 사고 싶어"))
+
+    assert result == "저렴한 아기 간식"
+
+
+def test_refine_query_returns_none_on_failure(monkeypatch):
+    from app.agents import gpt
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            raise RuntimeError("API 오류")
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr(gpt, "_client", lambda: _FakeClient())
+
+    assert asyncio.run(gpt.refine_query("저렴한 아기 간식을 사고 싶어")) is None
+
+
+def test_run_elevenst_only_debate_refines_conversational_query_before_search(monkeypatch):
+    """대화체 질의는 정제된 검색어로 11번가를 검색해야 하고, 최종 응답의
+    query 필드도 정제된 검색어를 반영해야 한다(추천 Agent 프롬프트/에러
+    메시지와 일관성 유지)."""
+    seen_search_query = {}
+
+    async def _fake_search(query, limit=10):
+        seen_search_query["query"] = query
+        return [_item("아기 간식 세트", 5000, "1")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
+
+    async def _fake_embed(texts):
+        return None
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _fake_refine(query):
+        return "저렴한 아기 간식"
+
+    seen_recommend_query = {}
+
+    async def _fake_recommend(query, candidates):
+        seen_recommend_query["query"] = query
+        return 0, "가성비 좋음"
+
+    monkeypatch.setattr(debate.gpt, "refine_query", _fake_refine)
+    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
+
+    result = asyncio.run(debate.run_elevenst_only_debate("저렴한 아기 간식을 사고 싶어"))
+
+    assert seen_search_query["query"] == "저렴한 아기 간식"
+    assert seen_recommend_query["query"] == "저렴한 아기 간식"
+    assert result.query == "저렴한 아기 간식"
+
+
+def test_run_elevenst_only_debate_skips_refine_for_clean_query(monkeypatch):
+    """이미 짧고 깨끗한 검색어는 정제(LLM 호출) 자체를 건너뛰어야 한다 -
+    불필요한 지연/비용을 늘리지 않는다."""
+
+    async def _fake_search(query, limit=10):
+        return [_item("찾는 상품 A", 1000, "1")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
+
+    async def _fake_embed(texts):
+        return None
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _boom_refine(query):
+        raise AssertionError("깨끗한 검색어인데 refine_query가 호출됐다")
+
+    async def _fake_recommend(query, candidates):
+        return 0, "가장 저렴함"
+
+    monkeypatch.setattr(debate.gpt, "refine_query", _boom_refine)
+    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
+
+    result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
+
+    assert result.query == "찾는 상품"
+
+
+def test_run_elevenst_only_debate_falls_back_to_original_query_when_refine_fails(monkeypatch):
+    async def _fake_search(query, limit=10):
+        return [_item("찾는 상품 A", 1000, "1")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
+
+    async def _fake_embed(texts):
+        return None
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _fake_refine(query):
+        return None  # 실패(키 없음·API 오류)
+
+    async def _fake_recommend(query, candidates):
+        return 0, "가장 저렴함"
+
+    monkeypatch.setattr(debate.gpt, "refine_query", _fake_refine)
+    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
+
+    result = asyncio.run(debate.run_elevenst_only_debate("아기 간식을 사고 싶어"))
+
+    # 정제 실패해도 원래 질의 그대로 검색을 계속 진행해야 한다.
+    assert result.query == "아기 간식을 사고 싶어"
+
+
+def test_run_elevenst_only_debate_uses_semantic_fallback_when_rapidfuzz_rejects_everything(monkeypatch):
+    """실측(2026-08-24, "망고주스를 사고 싶어" 검색 실패) - rapidfuzz가 표기
+    차이(붙여쓰기 vs 쪼개서 다른 순서)로 진짜 매치를 전부 거부해도,
+    semantic_relevance_fallback이 임베딩 유사도로 구제하면 검색이 성공해야
+    한다."""
+
+    async def _fake_search(query, limit=10):
+        return [_item("카프리썬 오렌지망고 200ml x 40입 주스", 15000, "1")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    # rapidfuzz 기반 1차 필터는 항상 거부(실측처럼 표기 차이로 전부 탈락하는 상황을 재현).
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: False)
+
+    async def _fake_embed(texts):
+        return [[1.0, 0.0] if t == "망고주스" else [0.9, 0.1] for t in texts]
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _fake_recommend(query, candidates):
+        return 0, "가장 관련성 높음"
+
+    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
+
+    result = asyncio.run(debate.run_elevenst_only_debate("망고주스"))
+
+    assert result.decision.product_name == "카프리썬 오렌지망고 200ml x 40입 주스"
+
+
+def test_run_elevenst_only_debate_skips_semantic_fallback_for_facet_drilldown(monkeypatch):
+    """facet_answers가 있는 드릴다운 경로는 이미 _filter_items_by_facet_answers로
+    걸러진 결과라 semantic_relevance_fallback을 또 태우면 안 된다(불필요한
+    임베딩 호출) - 0건이면 그냥 대안 표기 재검색으로 넘어가야 한다."""
+
+    async def _fake_search(query, limit=10):
+        return []
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _boom_semantic_fallback(query, items):
+        raise AssertionError("facet_answers 드릴다운인데 semantic_relevance_fallback이 호출됐다")
+
+    monkeypatch.setattr(debate.price_table_module, "semantic_relevance_fallback", _boom_semantic_fallback)
+
+    async def _fake_variants(query):
+        return []
+
+    monkeypatch.setattr(debate.hcx, "generate_query_variants", _fake_variants)
+
+    try:
+        asyncio.run(
+            debate.run_elevenst_only_debate(
+                "찾는 상품 브랜드A", base_query="찾는 상품", facet_answers={"브랜드": ["브랜드A"]}
+            )
+        )
+        raise AssertionError("RuntimeError가 발생해야 한다")
+    except RuntimeError as exc:
+        assert "관련성 있는 상품을 찾지 못했습니다" in str(exc)
