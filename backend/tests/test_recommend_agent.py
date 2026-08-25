@@ -752,3 +752,112 @@ def test_run_elevenst_only_debate_skips_semantic_fallback_for_facet_drilldown(mo
         raise AssertionError("RuntimeError가 발생해야 한다")
     except RuntimeError as exc:
         assert "관련성 있는 상품을 찾지 못했습니다" in str(exc)
+
+
+def test_run_elevenst_only_debate_filters_by_price_condition_before_recommending(monkeypatch):
+    """"망고주스 2만원대로 사고 싶어" - 가격 조건에 맞는 후보가 있으면 그
+    범위 안의 후보만 추천 Agent에게 넘겨야 한다(범위 밖 후보가 섞여서
+    엉뚱하게 뽑히면 안 됨)."""
+
+    async def _fake_search(query, limit=10):
+        assert query == "망고주스"
+        return [
+            _item("망고주스 A", 15000, "1"),
+            _item("망고주스 B", 25000, "2"),
+            _item("망고주스 C", 45000, "3"),
+        ]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
+
+    async def _fake_embed(texts):
+        return None
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _fake_refine(query):
+        return "망고주스"
+
+    monkeypatch.setattr(debate.gpt, "refine_query", _fake_refine)
+
+    seen_candidates = {}
+
+    async def _fake_recommend(query, candidates):
+        seen_candidates["candidates"] = candidates
+        return 0, "가격대에 맞음"
+
+    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
+
+    result = asyncio.run(debate.run_elevenst_only_debate("망고주스 2만원대로 사고 싶어"))
+
+    # 2만원대(20000~29999) 안에 드는 건 "망고주스 B"(25000원) 하나뿐이다.
+    assert [c["product_name"] for c in seen_candidates["candidates"]] == ["망고주스 B"]
+    assert result.decision.product_name == "망고주스 B"
+
+
+def test_run_elevenst_only_debate_falls_back_to_closest_price_when_none_in_range(monkeypatch):
+    """가격 조건에 맞는 후보가 하나도 없으면 추천 Agent를 부르지 않고,
+    가격이 가장 근접한 상품을 규칙 기반으로 안내해야 한다."""
+
+    async def _fake_search(query, limit=10):
+        return [
+            _item("망고주스 A", 39000, "1"),
+            _item("망고주스 B", 45000, "2"),
+        ]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
+
+    async def _fake_embed(texts):
+        return None
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _fake_refine(query):
+        return "망고주스"
+
+    monkeypatch.setattr(debate.gpt, "refine_query", _fake_refine)
+
+    async def _boom_recommend(query, candidates):
+        raise AssertionError("가격 조건 미충족 시 recommend_best가 호출되면 안 된다")
+
+    monkeypatch.setattr(debate.gpt, "recommend_best", _boom_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
+
+    result = asyncio.run(debate.run_elevenst_only_debate("망고주스 2만원대로 사고 싶어"))
+
+    # 39000원이 45000원보다 2만원대(상한 29999)에 더 가깝다.
+    assert result.decision.product_name == "망고주스 A"
+    assert "20,000원~29,999원" in result.decision.reasoning
+    assert "찾지 못해" in result.decision.reasoning
+
+
+def test_run_elevenst_only_debate_stream_falls_back_to_closest_price_when_none_in_range(monkeypatch):
+    async def _fake_search(query, limit=10):
+        return [_item("망고주스 A", 39000, "1"), _item("망고주스 B", 45000, "2")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
+
+    async def _fake_embed(texts):
+        return None
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    async def _fake_refine(query):
+        return "망고주스"
+
+    monkeypatch.setattr(debate.gpt, "refine_query", _fake_refine)
+
+    async def _boom_recommend(query, candidates):
+        raise AssertionError("가격 조건 미충족 시 recommend_best가 호출되면 안 된다")
+
+    monkeypatch.setattr(debate.gpt, "recommend_best", _boom_recommend)
+    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
+
+    events = asyncio.run(_collect_stream("망고주스 2만원대로 사고 싶어"))
+
+    final = next(e for e in events if e["type"] == "final")
+    assert final["result"]["decision"]["product_name"] == "망고주스 A"
+    assert "찾지 못해" in final["result"]["decision"]["reasoning"]

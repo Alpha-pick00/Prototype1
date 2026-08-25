@@ -116,6 +116,70 @@ def looks_conversational_query(query: str) -> bool:
     return bool(BUY_INTENT_PATTERN.search(stripped)) or bool(_GREETING_PREFIX_PATTERN.match(stripped))
 
 
+# (2026-08-25, 사용자 요청 "망고주스 2만원대로 사고 싶어 같은 질문에 정확한
+# 답변이 나오게") - "2만원대"/"3만원 이하" 같은 가격 조건은 검색어 텍스트로
+# 11번가 keyword 검색에 그대로 넘기면 안 된다(상품명에 "2만원대"라는 글자가
+# 그대로 박혀있는 상품은 거의 없어 검색 자체가 실패한다). 정규식으로 숫자
+# 범위를 뽑아내고 그 부분은 질의에서 제거한다 - app.debate가 검색 결과에
+# 대한 가격 후처리 필터로 쓴다. 범위 표현(예: "2만원에서 3만원 사이")을 가장
+# 먼저 확인해야, 그 안의 "2만원"이 뒤의 "이하"류 단일값 패턴에 부분적으로
+# 걸리는 걸 막는다.
+_PRICE_RANGE_MANWON_PATTERN = re.compile(
+    r"(\d+)\s*만\s*원\s*(?:에서|부터|~|-)\s*(\d+)\s*만\s*원\s*(?:사이|까지)?"
+)
+_PRICE_MANWON_DAE_PATTERN = re.compile(r"(\d+)\s*만\s*원\s*대")
+_PRICE_CHEONWON_DAE_PATTERN = re.compile(r"(\d+)\s*천\s*원\s*대")
+_PRICE_MANWON_MAX_PATTERN = re.compile(r"(\d+)\s*만\s*원\s*(?:이하|이내|미만)")
+_PRICE_MANWON_MIN_PATTERN = re.compile(r"(\d+)\s*만\s*원\s*(?:이상|초과)")
+_PRICE_WON_MAX_PATTERN = re.compile(r"(\d+)\s*원\s*(?:이하|이내|미만)")
+_PRICE_WON_MIN_PATTERN = re.compile(r"(\d+)\s*원\s*(?:이상|초과)")
+
+
+def _strip_match(query: str, match: re.Match) -> str:
+    stripped = query[: match.start()] + query[match.end() :]
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
+def extract_price_range(query: str) -> tuple[str, int | None, int | None]:
+    """질의에서 가격 조건 표현을 찾아 (조건이 제거된 질의, 최소가 KRW,
+    최대가 KRW)로 반환한다. 못 찾으면 (원래 질의 그대로, None, None) -
+    호출부가 이 경우 가격 필터를 아예 건너뛴다. 근사치 휴리스틱이며
+    "2만 5천원"처럼 만/천 단위가 섞인 값이나 단위가 서로 다른 범위
+    (예: "5천원에서 2만원 사이")는 다루지 않는다 - 흔한 표현 위주로만
+    커버한다."""
+    match = _PRICE_RANGE_MANWON_PATTERN.search(query)
+    if match:
+        return _strip_match(query, match), int(match.group(1)) * 10000, int(match.group(2)) * 10000
+
+    match = _PRICE_MANWON_DAE_PATTERN.search(query)
+    if match:
+        base = int(match.group(1)) * 10000
+        return _strip_match(query, match), base, base + 9999
+
+    match = _PRICE_CHEONWON_DAE_PATTERN.search(query)
+    if match:
+        base = int(match.group(1)) * 1000
+        return _strip_match(query, match), base, base + 999
+
+    match = _PRICE_MANWON_MAX_PATTERN.search(query)
+    if match:
+        return _strip_match(query, match), None, int(match.group(1)) * 10000
+
+    match = _PRICE_MANWON_MIN_PATTERN.search(query)
+    if match:
+        return _strip_match(query, match), int(match.group(1)) * 10000, None
+
+    match = _PRICE_WON_MAX_PATTERN.search(query)
+    if match:
+        return _strip_match(query, match), None, int(match.group(1))
+
+    match = _PRICE_WON_MIN_PATTERN.search(query)
+    if match:
+        return _strip_match(query, match), int(match.group(1)), None
+
+    return query, None, None
+
+
 def is_non_product_chitchat(query: str) -> bool:
     """상품 검색이 아닌 인사말/잡담/시비를 순수 로컬 판정으로 감지한다 - 네트워크나
     LLM 호출이 전혀 없다(사용자 요청, 2026-08-15: "자기가 상품으로 인식못하는
