@@ -7,9 +7,13 @@ import deepseekLogo from '../../assets/about/logos/deepseek.svg';
 import awsLogo from '../../assets/about/logos/aws.svg';
 
 // "gpt" 에이전트 슬롯은 Qwen(DashScope)이 담당한다(backend/app/agents/gpt.py
-// 참고) - qwen.svg는 정식 로고 에셋을 아직 못 구해 임시 텍스트 워드마크다.
-// 실제 로고 파일이 생기면 교체할 것. 메인 검색은 11번가 오픈 API 기반이라
-// (Tavily/다나와 스크래핑 제거) 11번가 로고 에셋을 구하면 이 자리에 추가할 것.
+// 참고). qwen.svg는 lobehub/lobe-icons(MIT, AI 서비스 attribution 용도로 만든
+// 오픈소스 아이콘셋)에서 가져온 것 - Qwen 공식 자산이 아니라 커뮤니티 아이콘이다.
+// 11번가·HCX는 여기(로고 마퀴)에는 일부러 안 넣는다(2026-08-25 논의) - 실제
+// 공식 파트너십 없이 회사 로고(상표)를 "Powered by"로 올리면 관계를 과장해
+// 보이게 할 위험이 있다(AWS/Qwen/DeepSeek는 API 사용자의 로고 표기를 비교적
+// 관대하게 허용하는 편이라 유지). 11번가/HCX 언급은 이미 How We Curate·
+// Services 섹션에 텍스트로만 들어가 있다.
 const poweredByClients = [
   { name: 'Qwen', url: 'https://qwenlm.ai', logo: qwenLogo },
   { name: 'DeepSeek', url: 'https://www.deepseek.com', logo: deepseekLogo },
