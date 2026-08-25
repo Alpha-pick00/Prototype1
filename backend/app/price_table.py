@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 # 다양성이 나온다.
 CLARIFY_SEARCH_LIMIT = 90
 
+# 단발 질의(드릴다운 없이 바로 검색) 전용(2026-08-25 사용자 리포트 - "초콜릿
+# 사고싶어 하면 책이 뜨고 초콜릿만 치면 상품이 나온다") - 11번가 검색은
+# 가격 오름차순(sortCd=A)이라 최저가 10개 안에 "공병호의 초콜릿"류(제목에
+# 질의어가 그대로 들어간 헐값 중고책)처럼 카테고리는 다른데 이름만 우연히
+# 겹치는 상품이 섞이면, _product_name_matches(단순 이름 매칭)를 통과하는
+# 후보가 그것 하나뿐이라 추천 Agent에게 다른 선택지가 아예 없었다. 표본을
+# 넓히면 실제 초콜릿류가 함께 걸릴 확률이 올라가 추천 Agent(과 임베딩 관련도
+# 정렬)가 그중에서 고를 수 있다 - HTTP 요청은 그대로 1번이라(pageSize만
+# 커짐) 지연에 미치는 영향은 거의 없다.
+SINGLE_QUERY_SEARCH_LIMIT = 30
+
 
 async def _search_elevenst_items(query: str, limit: int) -> list[elevenst.ElevenstSearchItem]:
     """app.debate.check_clarify_facets의 상품명 표본 출처 - 막히거나 실패해도

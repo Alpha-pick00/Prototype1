@@ -45,7 +45,7 @@ def test_search_candidates_searches_directly_when_no_base_query(monkeypatch):
 
     items = asyncio.run(debate._search_candidates("초코파이", None))
 
-    assert seen == {"query": "초코파이", "limit": 10}
+    assert seen == {"query": "초코파이", "limit": debate.price_table_module.SINGLE_QUERY_SEARCH_LIMIT}
     assert [it["product_code"] for it in items] == ["1"]
 
 

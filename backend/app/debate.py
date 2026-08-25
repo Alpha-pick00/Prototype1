@@ -47,13 +47,14 @@ async def _search_candidates(
     facet_answers: dict[str, list[str]] | None = None,
 ) -> list[elevenst.ElevenstSearchItem]:
     """HITL 드릴다운(2026-08-20 재설계, "쿼리 재구성해서 검색하는 거나
-    다름없다" 지적) - base_query가 없으면(단발 질의) 그 질의로 좁게(10개)
-    검색해 끝낸다. base_query가 있으면(AI 상세검색을 거쳐 facet을 answer로
-    덧붙인 드릴다운 질의) 매번 새로 조합된 전체 문자열로 재검색하지 않는다 -
-    check_clarify_facets와 똑같이 안정적인 base_query로 넓게(90개) 검색한
-    뒤, 그 위에 사용자가 덧붙인 답(facet 값들)을 구조적으로(순수 로컬 필터링,
-    추가 네트워크 요청 없음) 좁힌다 - 매 라운드 새 문자열을 만들어 11번가를
-    다시 때리는 대신, 검증된 후보군 자체를 필터링해 나간다.
+    다름없다" 지적) - base_query가 없으면(단발 질의) 그 질의로 좁게
+    (SINGLE_QUERY_SEARCH_LIMIT개) 검색해 끝낸다. base_query가 있으면(AI
+    상세검색을 거쳐 facet을 answer로 덧붙인 드릴다운 질의) 매번 새로 조합된
+    전체 문자열로 재검색하지 않는다 - check_clarify_facets와 똑같이 안정적인
+    base_query로 넓게(90개) 검색한 뒤, 그 위에 사용자가 덧붙인 답(facet 값들)을
+    구조적으로(순수 로컬 필터링, 추가 네트워크 요청 없음) 좁힌다 - 매 라운드
+    새 문자열을 만들어 11번가를 다시 때리는 대신, 검증된 후보군 자체를
+    필터링해 나간다.
 
     facet_answers(2026-08-24, 다중 선택 지원)가 있으면 그걸로 필터링한다(같은
     facet 안 값은 OR, facet끼리는 AND) - 없으면(구버전 요청) query/base_query
@@ -63,7 +64,7 @@ async def _search_candidates(
         if facet_answers:
             return _filter_items_by_facet_answers(items, facet_answers)
         return _filter_items_by_extra_terms(items, query, base_query)
-    return await elevenst.search_elevenst(query, limit=10)
+    return await elevenst.search_elevenst(query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT)
 
 
 async def _search_with_query_variants(query: str) -> list[elevenst.ElevenstSearchItem]:
@@ -105,6 +106,26 @@ async def _maybe_refine_query(query: str) -> str:
     return refined or query
 
 
+async def _refine_base_query(base_query: str | None, original_query: str, refined_query: str) -> str | None:
+    """base_query는 프론트가 드릴다운 체인의 첫 질의를 원문 그대로 들고
+    있다가 매 요청에 실어 보내는 값이라, query와 달리 _maybe_refine_query를
+    거치지 않는다. 아직 드릴다운 전인 첫 턴에는 base_query가 원래 query와
+    문자열까지 완전히 같다(2026-08-25 사용자 리포트 "망고주스 사고싶어 하면
+    결과가 안나와, 망고주스만 치면 나오는데") - query만 정제되고 base_query는
+    "사고싶어"가 그대로 남아있으면 둘이 달라져, 실제로는 드릴다운이 아닌데도
+    _search_candidates/check_clarify_facets가 drilldown 필터링 경로를 타면서
+    "사고싶어" 같은 군더더기 토큰을 answer로 취급해 유효 후보를 전부
+    걸러버린다. base_query가 원래 query와 같았던 경우엔 이미 계산해둔
+    refined_query를 그대로 재사용해 LLM을 다시 부르지 않고, 진짜 drilldown
+    (base_query가 처음부터 원래 query와 달랐던 경우)이면 base_query 자체를
+    별도로 정제한다."""
+    if not base_query or not base_query.strip():
+        return base_query
+    if base_query.strip() == original_query.strip():
+        return refined_query
+    return await _maybe_refine_query(base_query)
+
+
 async def _search_and_rank_candidates(
     query: str, base_query: str | None, facet_answers: dict[str, list[str]] | None
 ) -> tuple[str, list[elevenst.ElevenstSearchItem]]:
@@ -115,7 +136,9 @@ async def _search_and_rank_candidates(
     프롬프트/에러 메시지에도 일관되게 써야 한다(원래 질의로 검색하고 정제된
     질의로 설명하면 앞뒤가 안 맞는다). 관련 상품을 하나도 못 찾으면
     RuntimeError."""
+    original_query = query
     query = await _maybe_refine_query(query)
+    base_query = await _refine_base_query(base_query, original_query, query)
     items = await _search_candidates(query, base_query, facet_answers)
     relevant = (
         items
@@ -766,8 +789,14 @@ async def check_clarify_facets(
     # 2026-08-24 - "안녕 나 컵을 사고싶어"처럼 대화체로 감싼 질의는(짧아서
     # 프론트 looksAmbiguous()에 걸려 이 경로로 먼저 온다) 정제 없이 그대로
     # 검색하면 11번가 검색도 facet 추출도 실패한다(run_elevenst_only_debate*와
-    # 같은 이유 - _maybe_refine_query 참고).
+    # 같은 이유 - _maybe_refine_query 참고). base_query도 함께 정제해야 한다
+    # (2026-08-25 - _refine_base_query 참고. 첫 턴엔 base_query가 원래 query와
+    # 문자열까지 같아서, query만 정제하면 둘이 갈라져 아래 794줄 이후의
+    # drilldown 필터링 경로가 "사고싶어"를 답변 토큰으로 오인해 후보를 다
+    # 걸러버렸다).
+    original_query = query
     query = await _maybe_refine_query(query)
+    base_query = await _refine_base_query(base_query, original_query, query)
 
     static_facets = facet_cache.lookup(query)
     if static_facets is not None:
