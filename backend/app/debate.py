@@ -42,6 +42,25 @@ async def _rank_by_relevance(
     return [it for it, _ in scored]
 
 
+async def _search_elevenst_safely(query: str, limit: int, sort_cd: str = "A") -> list[elevenst.ElevenstSearchItem]:
+    """`_search_candidates` 전용 - 11번가 호출이 예외를 던져도(2026-08-26
+    실측, 50개 질의 배치 중 "아이패드 프로" - xml.etree.ElementTree.
+    ParseError: no element found, sortCd="H" 보정 검색에서 11번가가 빈/깨진
+    XML을 돌려줌) 파이프라인 전체를 죽이지 않고 빈 리스트로 폴백한다.
+    price_table._search_elevenst_items과 목적은 같지만 그 함수는 자체
+    액세서리 보정 검색 트리거를 내장하고 있어(check_clarify_facets 전용) -
+    `_search_candidates`가 그걸 그대로 쓰면 보정 검색이 이중으로 걸린다.
+    여기서는 순수 예외 안전성만 감싼다."""
+    try:
+        return await elevenst.search_elevenst(query, limit=limit, sort_cd=sort_cd)
+    except elevenst.ElevenstSearchBlocked:
+        logger.warning("elevenst search blocked for query=%r", query)
+        return []
+    except Exception:
+        logger.exception("elevenst search crashed for query=%r", query)
+        return []
+
+
 async def _search_candidates(
     query: str,
     base_query: str | None,
@@ -76,15 +95,15 @@ async def _search_candidates(
     verified=False로 나오면 이 플래그를 강제로 켜고 검색부터 한 번 더
     돈다 - 단어 목록이 못 잡는 케이스까지 결국 걸러내는 두 번째 안전망."""
     if base_query and base_query.strip() and base_query.strip() != query.strip():
-        items = await elevenst.search_elevenst(base_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT)
+        items = await _search_elevenst_safely(base_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT)
         if facet_answers:
             return _filter_items_by_facet_answers(items, facet_answers)
         return _filter_items_by_extra_terms(items, query, base_query)
 
-    items = await elevenst.search_elevenst(query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT)
+    items = await _search_elevenst_safely(query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT)
     relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
     if force_price_rescue or price_table_module.most_candidates_look_like_accessories(query, relevant):
-        high_price_items = await elevenst.search_elevenst(
+        high_price_items = await _search_elevenst_safely(
             query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT, sort_cd="H"
         )
         items = price_table_module._dedupe_by_product_code(items + high_price_items)
