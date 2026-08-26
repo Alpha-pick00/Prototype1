@@ -319,3 +319,51 @@ async def extract_facets_from_names(
         return facets[:MAX_FACETS]
     except Exception:
         return []
+
+
+# 2026-08-26, 사용자 요청("비용 시간 늘어나도 일단 상품이 잘 매핑되어야 해") -
+# 액세서리 도배 트리거(app.price_table.most_candidates_look_like_accessories)는
+# 키워드 목록 기반이라 커버리지가 늘 부족하다(실측: "설치 카메라 렌즈
+# 보호대(포지셔닝 프레임...)"처럼 목록에 없는 표현을 쓴 액세서리가 섞이면
+# 90개 중 2개만 안 걸려도 트리거를 놓쳤다). 의미로 직접 판단하는 이 게이트로
+# 보완한다 - app.debate._search_candidates가 키워드 트리거가 안 걸렸을
+# 때만(비용 절감) 이걸 추가로 확인한다.
+GENUINE_PRODUCT_CHECK_INSTRUCTIONS = (
+    "당신은 쇼핑 검색 결과 상품명 목록을 보고, 그 안에 사용자가 찾는 상품의 "
+    "본품이 실제로 있는지만 판정하는 에이전트입니다. 아래 목록은 검색어와 "
+    "텍스트가 겹쳐서 걸러졌을 뿐, 본품이 아니라 그 상품에 쓰는 케이스·충전기·"
+    "거치대·파우치·스트랩·보호필름 같은 액세서리/부속품/주변기기만 있고 "
+    "정작 본품 자체는 하나도 없을 수 있습니다. 목록 중 단 하나라도 진짜 "
+    "본품(액세서리가 아닌 그 자체)이 있으면 true, 전부 액세서리/부속품/"
+    "주변기기뿐이면 false로 답하세요. 판단이 애매하면 true로 두세요(과도하게 "
+    "재검색을 유발하지 마세요). 반드시 아래 JSON 형식으로만 답하세요. 다른 "
+    "텍스트나 코드펜스를 덧붙이지 마세요.\n\n"
+    '{"has_genuine_product": true}'
+)
+
+_MAX_GENUINE_CHECK_ITEMS = 20
+
+
+def build_genuine_product_check_prompt(query: str, product_names: list[str]) -> str:
+    lines = "\n".join(f"- {name}" for name in product_names)
+    return f"{GENUINE_PRODUCT_CHECK_INSTRUCTIONS}\n\n검색어: {query}\n\n상품 목록:\n{lines}"
+
+
+async def looks_accessory_flooded(query: str, product_names: list[str]) -> bool:
+    """검색 결과에 본품이 안 보이고 액세서리로 도배됐는지 의미로 판단한다.
+    실패(키 없음·API 오류·JSON 파싱 실패)하면 False(보정 검색 트리거 안 함
+    - 그래프풀 폴백, 기존 동작 유지)."""
+    if not product_names or not settings.deepseek_api_key:
+        return False
+    try:
+        client = _client()
+        prompt = build_genuine_product_check_prompt(query, product_names[:_MAX_GENUINE_CHECK_ITEMS])
+        response = await client.chat.completions.create(
+            model=settings.deepseek_model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        data = parse_json_object(response.choices[0].message.content or "")
+        return data.get("has_genuine_product") is False
+    except Exception:
+        return False

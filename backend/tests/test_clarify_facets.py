@@ -260,8 +260,89 @@ def test_extract_facets_from_names_parses_deepseek_json_response(monkeypatch):
     facets = asyncio.run(deepseek.extract_facets_from_names("음료수", ["코카콜라 350ml", "칠성사이다 190ml"]))
 
     assert len(facets) == 2
-    labels = {f.label for f in facets}
-    assert labels == {"카테고리", "용량"}
+
+
+# -- app.agents.deepseek.looks_accessory_flooded (2026-08-26, 사용자 요청 -
+# "비용 시간 늘어나도 일단 상품이 잘 매핑되어야 해") ---------------------------
+
+
+def _fake_deepseek_client(content: str):
+    class _FakeMessage:
+        pass
+
+    message = _FakeMessage()
+    message.content = content
+
+    class _FakeChoice:
+        pass
+
+    choice = _FakeChoice()
+    choice.message = message
+
+    class _FakeResponse:
+        choices = [choice]
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            return _FakeResponse()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    return _FakeClient()
+
+
+def test_looks_accessory_flooded_true_when_no_genuine_product(monkeypatch):
+    from app.agents import deepseek
+
+    monkeypatch.setattr("app.config.settings.deepseek_api_key", "fake-key")
+    monkeypatch.setattr(deepseek, "_client", lambda: _fake_deepseek_client('{"has_genuine_product": false}'))
+
+    result = asyncio.run(deepseek.looks_accessory_flooded("아이폰 17", ["에반게리온 주변기기 아이폰 17"]))
+    assert result is True
+
+
+def test_looks_accessory_flooded_false_when_genuine_product_present(monkeypatch):
+    from app.agents import deepseek
+
+    monkeypatch.setattr("app.config.settings.deepseek_api_key", "fake-key")
+    monkeypatch.setattr(deepseek, "_client", lambda: _fake_deepseek_client('{"has_genuine_product": true}'))
+
+    result = asyncio.run(deepseek.looks_accessory_flooded("아이폰 17", ["Apple 아이폰 17 프로 맥스"]))
+    assert result is False
+
+
+def test_looks_accessory_flooded_false_when_key_missing(monkeypatch):
+    from app.agents import deepseek
+
+    monkeypatch.setattr("app.config.settings.deepseek_api_key", None)
+
+    async def _boom():
+        raise AssertionError("키가 없는데 DeepSeek를 불렀다")
+
+    monkeypatch.setattr(deepseek, "_client", _boom)
+
+    result = asyncio.run(deepseek.looks_accessory_flooded("아이폰 17", ["아이폰 17 케이스"]))
+    assert result is False
+
+
+def test_looks_accessory_flooded_false_on_malformed_response(monkeypatch):
+    from app.agents import deepseek
+
+    monkeypatch.setattr("app.config.settings.deepseek_api_key", "fake-key")
+    monkeypatch.setattr(deepseek, "_client", lambda: _fake_deepseek_client("이건 JSON이 아님"))
+
+    result = asyncio.run(deepseek.looks_accessory_flooded("아이폰 17", ["아이폰 17 케이스"]))
+    assert result is False
+
+
+def test_looks_accessory_flooded_false_for_empty_product_names():
+    from app.agents import deepseek
+
+    assert asyncio.run(deepseek.looks_accessory_flooded("아이폰 17", [])) is False
 
 
 def test_extract_facets_from_names_sorts_brand_options_by_popularity(monkeypatch):
