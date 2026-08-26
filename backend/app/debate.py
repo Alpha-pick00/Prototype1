@@ -10,7 +10,7 @@ from . import facet_cache
 from . import llm_cache
 from . import price_table as price_table_module
 from .agents import deepseek, gpt, hcx
-from .intent import is_non_product_chitchat, looks_conversational_query, needs_clarification
+from .intent import extract_price_range, is_non_product_chitchat, looks_conversational_query, needs_clarification
 from .schemas import (
     ClarifyFacet,
     ClarifyOptions,
@@ -149,19 +149,56 @@ async def _refine_base_query(base_query: str | None, original_query: str, refine
     return await _maybe_refine_query(base_query)
 
 
+# (2026-08-25, 사용자 요청 "망고주스 2만원대로 사고 싶어 같은 질문에 정확한
+# 답변이 나오게") - 가격 조건에 맞는 후보가 하나도 없을 때, 순수 의미
+# 유사도만으로는 모델/수량 차이를 못 잡는 것과 같은 이유로, "가장 근접한
+# 가격"이라는 주장도 LLM 판단이 아니라 이 숫자 계산으로 확정한다.
+def _price_in_range(price_krw: int, price_min: int | None, price_max: int | None) -> bool:
+    if price_min is not None and price_krw < price_min:
+        return False
+    if price_max is not None and price_krw > price_max:
+        return False
+    return True
+
+
+def _price_distance(price_krw: int, price_min: int | None, price_max: int | None) -> int:
+    if price_min is not None and price_krw < price_min:
+        return price_min - price_krw
+    if price_max is not None and price_krw > price_max:
+        return price_krw - price_max
+    return 0
+
+
+def _format_price_condition(price_min: int | None, price_max: int | None) -> str:
+    if price_min is not None and price_max is not None:
+        return f"{price_min:,}원~{price_max:,}원"
+    if price_min is not None:
+        return f"{price_min:,}원 이상"
+    return f"{price_max:,}원 이하"
+
+
 async def _search_and_rank_candidates(
     query: str, base_query: str | None, facet_answers: dict[str, list[str]] | None
-) -> tuple[str, list[elevenst.ElevenstSearchItem]]:
+) -> tuple[str, list[elevenst.ElevenstSearchItem], str | None]:
     """검색 -> 관련성 필터 -> (0건이면 임베딩 의미 유사도 구제 -> 그래도 0건이면
-    대안 표기 재검색) -> 관련도순 정렬까지, run_elevenst_only_debate()와 그
-    스트리밍 버전이 공유하는 앞부분이다. 질의가 대화체면(_maybe_refine_query)
-    검색 전에 먼저 정제한다 - 반환하는 질의는 호출부가 이후 추천 Agent
-    프롬프트/에러 메시지에도 일관되게 써야 한다(원래 질의로 검색하고 정제된
-    질의로 설명하면 앞뒤가 안 맞는다). 관련 상품을 하나도 못 찾으면
-    RuntimeError."""
-    original_query = query
+    대안 표기 재검색) -> 가격 조건 필터 -> 관련도순 정렬까지,
+    run_elevenst_only_debate()와 그 스트리밍 버전이 공유하는 앞부분이다.
+    질의에 가격 조건이 있으면(예: "2만원대") extract_price_range로 먼저
+    떼어낸다 - 11번가 keyword 검색은 순수 텍스트 매칭이라 "2만원대" 같은
+    표현이 검색어에 남아있으면 검색 자체가 실패한다. 질의가 대화체면
+    (_maybe_refine_query) 그 다음 정제한다 - 반환하는 질의는 호출부가 이후
+    추천 Agent 프롬프트/에러 메시지에도 일관되게 써야 한다(원래 질의로
+    검색하고 정제된 질의로 설명하면 앞뒤가 안 맞는다). 관련 상품을 하나도
+    못 찾으면 RuntimeError.
+
+    세 번째 반환값(price_miss_note)은 가격 조건이 있는데 그 범위 안에
+    드는 후보가 하나도 없을 때만 문자열("2만원~3만원" 등)이고, 그 외엔
+    None이다 - 호출부가 이 값이 있으면 추천 Agent를 부르지 않고 가격
+    근접순으로 이미 정렬된 ranked[0]을 규칙 기반으로 그대로 쓴다."""
+    raw_query = query
+    query, price_min, price_max = extract_price_range(query)
     query = await _maybe_refine_query(query)
-    base_query = await _refine_base_query(base_query, original_query, query)
+    base_query = await _refine_base_query(base_query, raw_query, query)
     items = await _search_candidates(query, base_query, facet_answers)
     relevant = (
         items
@@ -174,7 +211,20 @@ async def _search_and_rank_candidates(
         relevant = await _search_with_query_variants(query)
     if not relevant:
         raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다.")
-    return query, await _rank_by_relevance(query, relevant)
+
+    if price_min is None and price_max is None:
+        return query, await _rank_by_relevance(query, relevant), None
+
+    in_range = [it for it in relevant if _price_in_range(it["price_krw"], price_min, price_max)]
+    if in_range:
+        return query, await _rank_by_relevance(query, in_range), None
+
+    # 가격 조건에 맞는 후보가 없다 - 가격이 가장 가까운 순으로 정렬해 반환한다
+    # (임베딩 관련도 재정렬은 하지 않는다 - 여기서는 "가격이 가장 가깝다"가
+    # 핵심 주장이라 그 순서를 그대로 지켜야 한다).
+    price_miss_note = _format_price_condition(price_min, price_max)
+    relevant.sort(key=lambda it: _price_distance(it["price_krw"], price_min, price_max))
+    return query, relevant, price_miss_note
 
 
 def _build_decision(
@@ -207,6 +257,26 @@ def _build_decision(
         retailer=best["seller"],
         url=best["url"],
         reasoning=reasoning,
+        chosen_agent="elevenst",
+        price_source="elevenst_offer",
+        image_url=best.get("image_url"),
+    )
+
+
+def _build_price_miss_decision(ranked: list[elevenst.ElevenstSearchItem], price_condition_label: str) -> Decision:
+    """가격 조건(app.intent.extract_price_range)에 맞는 후보가 하나도 없을 때
+    쓴다 - ranked는 _search_and_rank_candidates가 이미 가격 근접순으로
+    정렬해뒀으므로 첫 번째가 요청한 가격대에 가장 가까운 상품이다. 추천
+    Agent(LLM)에게 판단시키지 않고 규칙 기반으로 확정한다 - "가장 근접하다"는
+    객관적 사실이라, LLM이 리뷰 등 다른 이유로 다른 걸 고르면 이 안내 문구
+    자체가 거짓이 될 위험이 있다."""
+    best = ranked[0]
+    return Decision(
+        product_name=best["product_name"],
+        price=f"{best['price_krw']:,}원",
+        retailer=best["seller"],
+        url=best["url"],
+        reasoning=f"'{price_condition_label}' 조건에 맞는 상품은 찾지 못해, 가격이 가장 근접한 상품을 안내합니다.",
         chosen_agent="elevenst",
         price_source="elevenst_offer",
         image_url=best.get("image_url"),
@@ -271,17 +341,26 @@ async def run_elevenst_only_debate(
     문자열에 다 들어가면 spec_match.model_or_quantity_conflict가 "같은
     family(갤럭시S#)의 값 집합이 다르다"고 오판해 둘 중 하나만 있는 상품을
     전부 걸러내 버렸다(실측 확인) - OR로 고른 걸 사실상 AND로 요구하는
-    버그였다."""
-    query, ranked = await _search_and_rank_candidates(query, base_query, facet_answers)
+    버그였다.
 
-    # recommend_best(메인 선택)와 candidate_notes(다른 후보 각각의 이유)는
-    # 서로 의존하지 않는 별개 작업이라 동시에 실행한다 - 순서대로 부르면
-    # 두 호출 시간이 그대로 합산된다.
-    recommended, notes = await asyncio.gather(
-        gpt.recommend_best(query, ranked),
-        gpt.candidate_notes(query, ranked),
-    )
-    decision = _build_decision(ranked, recommended)
+    가격 조건(2026-08-25, "망고주스 2만원대로 사고 싶어")이 있는데 그 범위
+    안에 드는 후보가 없으면, 추천 Agent를 부르지 않고 가격이 가장 근접한
+    상품을 규칙 기반으로 안내한다(_build_price_miss_decision) - candidate_notes는
+    "다른 후보" 이유 표시를 위해 그대로 부른다."""
+    query, ranked, price_miss_note = await _search_and_rank_candidates(query, base_query, facet_answers)
+
+    if price_miss_note:
+        notes = await gpt.candidate_notes(query, ranked)
+        decision = _build_price_miss_decision(ranked, price_miss_note)
+    else:
+        # recommend_best(메인 선택)와 candidate_notes(다른 후보 각각의 이유)는
+        # 서로 의존하지 않는 별개 작업이라 동시에 실행한다 - 순서대로 부르면
+        # 두 호출 시간이 그대로 합산된다.
+        recommended, notes = await asyncio.gather(
+            gpt.recommend_best(query, ranked),
+            gpt.candidate_notes(query, ranked),
+        )
+        decision = _build_decision(ranked, recommended)
     proposals = _build_proposals(ranked, notes)
     return DecideResponse(query=query, proposals=proposals, decision=decision)
 
@@ -304,19 +383,25 @@ async def run_elevenst_only_debate_stream(
     줄어든다."""
     yield {"type": "status", "stage": "searching"}
     try:
-        query, ranked = await _search_and_rank_candidates(query, base_query, facet_answers)
+        query, ranked, price_miss_note = await _search_and_rank_candidates(query, base_query, facet_answers)
     except RuntimeError as exc:
         yield {"type": "error", "message": str(exc)}
         return
 
-    notes_task = asyncio.create_task(gpt.candidate_notes(query, ranked))
-    recommended = await gpt.recommend_best(query, ranked)
-    decision = _build_decision(ranked, recommended)
+    # 가격 조건에 맞는 후보가 없으면(price_miss_note) 추천 Agent를 부르지
+    # 않고 규칙 기반으로 바로 확정한다 - run_elevenst_only_debate와 같은 이유.
+    if price_miss_note:
+        decision = _build_price_miss_decision(ranked, price_miss_note)
+    else:
+        notes_task = asyncio.create_task(gpt.candidate_notes(query, ranked))
+        recommended = await gpt.recommend_best(query, ranked)
+        decision = _build_decision(ranked, recommended)
+
     proposals = _build_proposals(ranked, {})
     result = DecideResponse(query=query, proposals=proposals, decision=decision)
     yield {"type": "final", "result": result.model_dump()}
 
-    notes = await notes_task
+    notes = await (notes_task if not price_miss_note else gpt.candidate_notes(query, ranked))
     if notes:
         updated_proposals = _build_proposals(ranked, notes)
         yield {"type": "notes", "proposals": [p.model_dump() for p in updated_proposals]}
@@ -809,6 +894,15 @@ async def check_clarify_facets(
     if not needs_clarification(query) or is_non_product_chitchat(query):
         return ClarifyResponse(query=query, options=ClarifyOptions())
 
+    # 2026-08-25 - "망고주스 2만원대로 사고 싶어"처럼 가격 조건이 섞인 질의는
+    # 그 부분을 지우지 않으면 브랜드/용량 facet 추출용 상품명 검색 자체가
+    # 오염된다("2만원대"라는 글자가 검색어에 남아있으면 11번가 검색이 실패할
+    # 수 있다 - _search_and_rank_candidates와 같은 이유). facet 추출 자체는
+    # 가격 범위를 쓰지 않으므로(가격은 최종 결정 단계에서만 필터로 쓴다) 여기선
+    # 버린다.
+    original_query = query
+    query, _price_min, _price_max = extract_price_range(query)
+
     # 2026-08-24 - "안녕 나 컵을 사고싶어"처럼 대화체로 감싼 질의는(짧아서
     # 프론트 looksAmbiguous()에 걸려 이 경로로 먼저 온다) 정제 없이 그대로
     # 검색하면 11번가 검색도 facet 추출도 실패한다(run_elevenst_only_debate*와
@@ -817,7 +911,6 @@ async def check_clarify_facets(
     # 문자열까지 같아서, query만 정제하면 둘이 갈라져 아래 794줄 이후의
     # drilldown 필터링 경로가 "사고싶어"를 답변 토큰으로 오인해 후보를 다
     # 걸러버렸다).
-    original_query = query
     query = await _maybe_refine_query(query)
     base_query = await _refine_base_query(base_query, original_query, query)
 

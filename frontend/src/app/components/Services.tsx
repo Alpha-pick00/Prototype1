@@ -1,12 +1,19 @@
 import { useRef } from 'react';
 import { motion } from 'motion/react';
-import { Bot, ScanLine, ShoppingBag, BadgeCheck } from 'lucide-react';
+import { ShieldCheck, ScanLine, ShoppingBag, BadgeCheck } from 'lucide-react';
 
+// 2026-08-25 전면 개편 - 다나와 스크래핑 + Qwen·Groq·DeepSeek 멀티에이전트 토론
+// 구조가 11번가 공식 Open API 단일 소스로 바뀌면서(HowWeCurate.tsx 참고), 이
+// 페이지도 같은 이유로 손봤다. "검증된 15개 리테일러"(쿠팡·네이버쇼핑·G마켓 등)는
+// 특히 사실이 아니었다 - 네이버쇼핑 API는 서비스 종료, 쿠팡은 사업자 등록 필요,
+// G마켓/옥션은 판매자 전용 API라 다 못 쓰고 실제로는 11번가 하나만 쓴다(허위
+// 과장). "멀티에이전트 토론" 카드는 "근거 있는 추천"(마지막 카드)과 내용이
+// 겹치지 않도록, 그 앞 단계인 관련성 검증(엉뚱한 상품 거르기)으로 다시 잡았다.
 const services = [
   {
-    icon: Bot,
-    title: "멀티에이전트 토론",
-    description: "ChatGPT, Groq, DeepSeek가 각자 상품을 조사해 제안하고, Groq가 그 근거를 심사해 하나의 답으로 압축합니다."
+    icon: ShieldCheck,
+    title: "정확한 상품만 골라냅니다",
+    description: "이름만 비슷한 무관한 상품(간식을 찾는데 조리기구가 섞이는 경우 등)을 AI가 상품명과 의미 유사도로 걸러내, 실제로 찾는 상품만 후보에 남깁니다."
   },
   {
     icon: ScanLine,
@@ -15,8 +22,8 @@ const services = [
   },
   {
     icon: ShoppingBag,
-    title: "검증된 15개 리테일러",
-    description: "쿠팡, 네이버쇼핑, G마켓 등 실제 판매 중인 국내 쇼핑몰만 골라 비교합니다."
+    title: "11번가 공식 API",
+    description: "11번가가 공식 제공하는 실시간 판매 데이터를 직접 확인해 보여드립니다."
   },
   {
     icon: BadgeCheck,

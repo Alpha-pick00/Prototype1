@@ -16,7 +16,7 @@ from app.debate import (
     check_clarify_facets,
     run_elevenst_only_debate_stream,
 )
-from app.intent import is_non_product_chitchat, looks_conversational_query, needs_clarification
+from app.intent import extract_price_range, is_non_product_chitchat, looks_conversational_query, needs_clarification
 from app.main import app
 from app.schemas import ClarifyFacet
 
@@ -130,6 +130,53 @@ def test_looks_conversational_query_false_for_bare_greeting_only():
     # 인사말 하나뿐인 순수 잡담은 is_non_product_chitchat이 이미 앞단에서
     # 걸러내므로 이 함수가 신경 쓸 필요 없다(뒤에 내용이 없으면 False).
     assert looks_conversational_query("안녕하세요") is False
+
+
+# -- intent.extract_price_range: 가격 조건 표현 추출(2026-08-25) -----------------
+
+
+def test_extract_price_range_manwon_dae():
+    query, price_min, price_max = extract_price_range("망고주스 2만원대로 사고 싶어")
+    assert (price_min, price_max) == (20000, 29999)
+    assert "2만원대" not in query
+    assert "망고주스" in query
+
+
+def test_extract_price_range_cheonwon_dae():
+    query, price_min, price_max = extract_price_range("과자 5천원대")
+    assert (price_min, price_max) == (5000, 5999)
+    assert "과자" in query
+
+
+def test_extract_price_range_manwon_max():
+    for phrase in ["3만원 이하", "3만원 이내", "3만원 미만"]:
+        _, price_min, price_max = extract_price_range(f"초콜릿 {phrase}로 찾아줘")
+        assert (price_min, price_max) == (None, 30000), phrase
+
+
+def test_extract_price_range_manwon_min():
+    for phrase in ["3만원 이상", "3만원 초과"]:
+        _, price_min, price_max = extract_price_range(f"초콜릿 {phrase} 원하는데")
+        assert (price_min, price_max) == (30000, None), phrase
+
+
+def test_extract_price_range_won_max_and_min():
+    _, price_min, price_max = extract_price_range("컵 5000원 이하")
+    assert (price_min, price_max) == (None, 5000)
+    _, price_min, price_max = extract_price_range("컵 5000원 이상")
+    assert (price_min, price_max) == (5000, None)
+
+
+def test_extract_price_range_manwon_range():
+    query, price_min, price_max = extract_price_range("망고주스 2만원에서 3만원 사이로 사고 싶어")
+    assert (price_min, price_max) == (20000, 30000)
+    assert "망고주스" in query
+
+
+def test_extract_price_range_none_when_no_price_condition():
+    query, price_min, price_max = extract_price_range("망고주스를 사고 싶어")
+    assert (price_min, price_max) == (None, None)
+    assert query == "망고주스를 사고 싶어"
 
 
 # -- 회귀: 잡담 입력은 검색/LLM 호출 없이 즉시 실패한다(속도 개선) -----------------
