@@ -136,7 +136,7 @@ async def search_elevenst(query: str, limit: int = 5, sort_cd: str = "A") -> lis
     표본 안에 실제 본품이 아예 안 잡히고 표기에 상품명을 끼워 넣은 저가
     액세서리만 잡히는 경우가 있는데, 이때 "H"(높은가격순)로 다시 찾으면
     본품이 나온다(실측: H로 아이폰 17 프로맥스 550만원대 매물 확인) -
-    price_table.all_candidates_look_like_accessories가 이 경우를 감지해
+    price_table.most_candidates_look_like_accessories가 이 경우를 감지해
     _search_candidates가 그때만 sort_cd="H"로 보정 검색을 추가로 태운다.
     키가 없으면(.env 미설정) 즉시 빈 리스트 - 호출부가 "설정 안 됨"과
     "검색 결과 없음"을 굳이 구분할 필요가 없는 초기 단계라 조용히 넘어간다."""

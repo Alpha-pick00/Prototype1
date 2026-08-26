@@ -624,7 +624,7 @@ async def _run_pipeline_once(
 def _all_proposals_unverified(proposals: list[dict]) -> bool:
     """challenge(DeepSeek)가 상위 후보를 전부 verified=False로 판정했는지 -
     `_search_candidates`의 로컬 액세서리 단어 트리거(price_table.
-    all_candidates_look_like_accessories)가 놓친 케이스를 잡는 두 번째
+    most_candidates_look_like_accessories)가 놓친 케이스를 잡는 두 번째
     안전망이다. 단어 목록은 카테고리 커버리지가 늘 부족한데(2026-08-26
     실측 - "에반게리온 아이폰 케이스"의 "주변기기"가 목록에 없어 트리거를
     못 태웠다), 이건 의미 기반(DeepSeek) 판정 결과만 보므로 그 한계가

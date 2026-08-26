@@ -38,15 +38,32 @@ SINGLE_QUERY_SEARCH_LIMIT = 30
 async def _search_elevenst_items(query: str, limit: int) -> list[elevenst.ElevenstSearchItem]:
     """app.debate.check_clarify_facets의 상품명 표본 출처 - 막히거나 실패해도
     예외를 던지지 않고 빈 리스트를 반환한다(호출자가 폴백을 따로 두지 않아도
-    되도록)."""
+    되도록).
+
+    보정 검색(2026-08-26, "아이폰 17"을 치면 되묻는 옵션이 폰 스펙이 아니라
+    "케이스형태"/"패턴" 같은 액세서리 축으로 나오던 문제) - facet 추출용
+    표본이 전부 액세서리 지시어를 달고 있으면 sortCd="H"(높은가격순)로 한 번
+    더 찾아 합친다. `_search_candidates`가 메인 검색에서 쓰는 것과 동일한
+    트리거(most_candidates_look_like_accessories)다 - 표본 자체가 액세서리
+    투성이면 거기서 뽑히는 facet도 액세서리 축(케이스/충전기 등)일 수밖에
+    없으므로, 메인 검색과 같은 이유로 여기도 보정이 필요하다."""
     try:
-        return await elevenst.search_elevenst(query, limit=limit)
+        items = await elevenst.search_elevenst(query, limit=limit)
     except elevenst.ElevenstSearchBlocked:
         logger.warning("elevenst search blocked for query=%r", query)
         return []
     except Exception:
         logger.exception("elevenst search crashed for query=%r", query)
         return []
+
+    if most_candidates_look_like_accessories(query, items):
+        try:
+            high_price_items = await elevenst.search_elevenst(query, limit=limit, sort_cd="H")
+        except Exception:
+            logger.exception("elevenst 보정 검색(sortCd=H) 실패 for query=%r", query)
+            return items
+        items = _dedupe_by_product_code(items + high_price_items)
+    return items
 
 
 async def _search_elevenst_categories(query: str) -> list[elevenst.ElevenstCategoryGroup]:
@@ -109,8 +126,8 @@ def _product_name_matches(decision_name: str, candidate_name: str) -> bool:
 # 쓴다. 트리거가 과하게(오탐으로) 걸려도 피해는 검색 1번 더 하는 정도라
 # 하드 필터보다 리스크가 훨씬 낮다.
 _ACCESSORY_INDICATOR_TOKENS = {
-    "케이스", "커버", "파우치", "스킨", "필름", "강화유리", "보호필름",
-    "거치대", "마운트", "홀더", "그립", "그립톡", "스탠드",
+    "케이스", "커버", "파우치", "스킨", "필름", "강화유리", "보호필름", "보호대",
+    "거치대", "마운트", "홀더", "그립", "그립톡", "스탠드", "렌즈",
     "충전기", "충전패드", "충전케이블", "케이블", "젠더", "어댑터",
     "이어폰", "이어버드", "헤드폰", "헤드셋", "이어훅", "이어팁",
     "스트랩", "고리", "범퍼", "젤리케이스", "하드케이스", "배터리",
@@ -121,13 +138,22 @@ def _looks_like_accessory(product_name: str) -> bool:
     return any(token in product_name for token in _ACCESSORY_INDICATOR_TOKENS)
 
 
-def all_candidates_look_like_accessories(query: str, items: list[elevenst.ElevenstSearchItem]) -> bool:
-    """`_search_candidates`가 sortCd="H" 보정 검색을 태울지 판단하는 트리거.
-    질의 자체가 액세서리를 찾는 거면("아이폰 케이스") 트리거하지 않는다 -
-    그 경우 액세서리만 나오는 게 정상이다."""
+# 단어 목록은 구조적으로 늘 커버리지가 부족하다(실측 - "설치 카메라 렌즈
+# 보호대(포지셔닝 프레임...)"처럼 목록에 없는 표현을 쓴 액세서리가 섞여
+# 있으면 all()이 트리거를 놓친다 - 90개 표본 중 딱 2개만 안 걸려도 전체가
+# False가 됐다). "전부"가 아니라 "대다수"가 액세서리로 보이면 트리거하도록
+# 완화한다 - 표본에 어차피 안 걸리는 소수 표현이 몇 개 섞여도 흔들리지 않는다.
+_ACCESSORY_TRIGGER_RATIO = 0.9
+
+
+def most_candidates_look_like_accessories(query: str, items: list[elevenst.ElevenstSearchItem]) -> bool:
+    """`_search_candidates`/`_search_elevenst_items`가 sortCd="H" 보정 검색을
+    태울지 판단하는 트리거. 질의 자체가 액세서리를 찾는 거면("아이폰 케이스")
+    트리거하지 않는다 - 그 경우 액세서리만 나오는 게 정상이다."""
     if not items or _looks_like_accessory(query):
         return False
-    return all(_looks_like_accessory(it["product_name"]) for it in items)
+    accessory_count = sum(1 for it in items if _looks_like_accessory(it["product_name"]))
+    return accessory_count / len(items) >= _ACCESSORY_TRIGGER_RATIO
 
 
 def _dedupe_by_product_code(items: list[elevenst.ElevenstSearchItem]) -> list[elevenst.ElevenstSearchItem]:
