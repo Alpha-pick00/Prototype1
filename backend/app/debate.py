@@ -82,7 +82,7 @@ async def _search_candidates(
 
     items = await elevenst.search_elevenst(query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT)
     relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
-    if force_price_rescue or price_table_module.all_candidates_look_like_accessories(query, relevant):
+    if force_price_rescue or price_table_module.most_candidates_look_like_accessories(query, relevant):
         high_price_items = await elevenst.search_elevenst(
             query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT, sort_cd="H"
         )

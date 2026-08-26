@@ -39,15 +39,25 @@ def is_bulk_query(query: str) -> bool:
 # 메타데이터(facet)가 다른 문제는 AI 상세검색(check_clarify_facets, 실제 검색
 # 결과 상품명에서 DeepSeek이 즉석에서 카테고리별 facet을 뽑는 경로)이 이미
 # 해결한다. 이 경로가 더 많은 질의에서 우선 시도되도록 범위를 "삼성 냉장고
-# 스탠드형"처럼 짧지만 구체성이 붙기 시작한 질의까지 넓힌다 - 여전히 숫자(스펙)가
-# 있으면 제외되고, facet을 못 찾으면 원래 경로로 그대로 진행되므로 위험 없음.
+# 스탠드형"처럼 짧지만 구체성이 붙기 시작한 질의까지 넓힌다.
 SHORT_QUERY_TOKEN_LIMIT = 4
-_HAS_DIGIT_PATTERN = re.compile(r"\d")
 
 
 def _is_short_bare_query(query: str) -> bool:
+    """(2026-08-26 수정, 사용자 리포트 - "아이폰 17을 쳤을 때 옵션을 선택해야
+    하지 않나?") 예전엔 숫자가 하나라도 있으면 무조건 "이미 구체적"으로 보고
+    스킵했는데, "아이폰 17"의 "17"은 모델명일 뿐 용량/색상 같은 다른 축은
+    전혀 안 정해져 있어 실제로는 여전히 되물어야 한다. 숫자를 통째로 배척하는
+    대신, 그 숫자가 진짜로 스펙을 이미 확정하는 경우(우유 2개 같은 수량/부피 -
+    is_bulk_query, 2만원대 같은 가격 조건 - extract_price_range)만 구체적으로
+    가려낸다 - 그 외의 숫자(모델명 등)는 더 이상 clarify를 막지 않는다."""
     tokens = query.strip().split()
-    return 0 < len(tokens) <= SHORT_QUERY_TOKEN_LIMIT and not _HAS_DIGIT_PATTERN.search(query)
+    if not (0 < len(tokens) <= SHORT_QUERY_TOKEN_LIMIT):
+        return False
+    if is_bulk_query(query):
+        return False
+    _, price_min, price_max = extract_price_range(query)
+    return price_min is None and price_max is None
 
 
 def needs_clarification(query: str) -> bool:

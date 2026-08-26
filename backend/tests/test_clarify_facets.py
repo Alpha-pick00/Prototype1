@@ -23,7 +23,7 @@ from app.schemas import ClarifyFacet
 client = TestClient(app)
 
 
-# -- intent.needs_clarification: 짧고 숫자 없는 검색어 휴리스틱 -----------------
+# -- intent.needs_clarification: 짧은 검색어 휴리스틱(수량/가격조건 숫자만 제외) --
 
 
 def test_needs_clarification_true_for_short_bare_category_word():
@@ -34,9 +34,11 @@ def test_needs_clarification_true_for_two_word_bare_query():
     assert needs_clarification("과자 선물") is True
 
 
-def test_needs_clarification_false_for_query_with_digit():
-    # "테스트 상품 15" 처럼 숫자가 섞이면 이미 구체적인 스펙 검색으로 본다.
-    assert needs_clarification("아이폰 15") is False
+def test_needs_clarification_true_for_query_with_model_number_digit():
+    # 2026-08-26 수정("아이폰 17을 쳤을 때 옵션을 선택해야 하지 않나?") -
+    # "15"는 모델명일 뿐 용량/색상은 안 정해져 있어 여전히 되물어야 한다.
+    # 예전엔 숫자가 하나라도 있으면 무조건 구체적이라고 봐서 이게 False였다.
+    assert needs_clarification("아이폰 15") is True
 
 
 def test_needs_clarification_false_for_long_specific_query():
@@ -44,8 +46,15 @@ def test_needs_clarification_false_for_long_specific_query():
 
 
 def test_needs_clarification_false_for_bulk_spec_query():
-    # 단위/수량이 붙으면 is_bulk_query가 우선이라 clarify로 새지 않는다(기존 동작).
+    # 단위/수량이 붙으면 is_bulk_query가 우선이라 clarify로 새지 않는다(기존 동작,
+    # 숫자 배척 제거와 무관하게 유지 - is_bulk_query가 별도로 이 경우를 가려낸다).
     assert needs_clarification("생수 500ml") is False
+
+
+def test_needs_clarification_false_for_price_condition_query():
+    # "2만원대"는 가격 후처리 필터로 쓰일 조건이라(app.intent.extract_price_range)
+    # clarify로 새지 않고 그대로 검색 경로로 가야 한다.
+    assert needs_clarification("망고주스 2만원대") is False
 
 
 def test_needs_clarification_still_true_for_buy_intent_phrase():
@@ -1007,18 +1016,26 @@ def test_extract_facets_from_names_swallows_client_errors(monkeypatch):
 # -- app.debate.check_clarify_facets ------------------------------------------
 
 
-def test_check_clarify_facets_skips_search_for_specific_query(monkeypatch):
-    """구체적인 검색어는 needs_clarification()이 False라 다나와 검색조차 시도하지
-    않아야 한다 - search_danawa가 불리면 바로 실패하도록 걸어서 확인한다."""
+def test_check_clarify_facets_still_searches_when_model_number_leaves_other_axes_open(monkeypatch):
+    """2026-08-26 수정 - "아이폰 15 프로 256기가"는 모델·용량은 정해져 있지만
+    색상 등 다른 축은 여전히 비어있다(옛 테스트는 "숫자가 있으면 이미 충분히
+    구체적"이라는, 사용자가 "아이폰 17을 쳤을 때 옵션을 선택해야 하지 않나?"로
+    지적한 바로 그 잘못된 가정을 검증하고 있었다 - 이제는 검색/facet 추출을
+    실제로 시도해야 한다)."""
 
-    async def _boom(query, limit=3):
-        raise AssertionError("구체적인 검색어인데 elevenst.search_elevenst가 호출됐다")
+    async def _fake_search(query, limit=3):
+        return [{"pcode": "1", "product_name": "아이폰 15 프로 256GB 블랙티타늄", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _boom)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _fake_extract_facets(query, names, required_labels=None):
+        return [ClarifyFacet(label="색상", options=["블랙티타늄", "화이트티타늄"])]
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
 
     result = asyncio.run(check_clarify_facets("아이폰 15 프로 256기가"))
 
-    assert result.options.facets == []
+    assert result.options.facets[0].label == "색상"
 
 
 # -- check_clarify_facets: 정적 facet 캐시(속도 개선) --------------------------

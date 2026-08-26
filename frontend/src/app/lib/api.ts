@@ -160,22 +160,29 @@ export class ApiError extends Error {}
 // 호출 없이 즉시 facets: []로 끝난다(app/debate.py::check_clarify_facets 참고).
 //
 // looksAmbiguous()는 그 백엔드 검사(backend/app/intent.py::_is_short_bare_query)를
-// 그대로 흉내낸 순수 클라이언트 프리필터다 - 명백히 구체적인 검색어(숫자가 있거나
-// 단어가 5개 이상)에 대해서는 이 API를 아예 호출하지 않아서, 거의 모든 검색에서
-// 왕복 하나조차 안 생기게 한다. 오탐(애매한데 여기서 걸러짐)이 있어도 위험하지
-// 않다 - 그런 경우 사용자는 그냥 원래 검색 경로로 바로 넘어갈 뿐이다.
+// 흉내낸 순수 클라이언트 프리필터다 - 명백히 구체적인 검색어(단어가 5개 이상)에
+// 대해서는 이 API를 아예 호출하지 않아서, 거의 모든 검색에서 왕복 하나조차 안
+// 생기게 한다. 오탐(애매한데 여기서 걸러짐)이 있어도 위험하지 않다 - 그런
+// 경우 사용자는 그냥 원래 검색 경로로 바로 넘어갈 뿐이다.
 //
 // 2 -> 4(2026-08-15, 카테고리별 메타데이터 차이 - "냉장고 살 때랑 콜라 살 때
 // 쓰는 메타데이터가 다르다") - intent.py::SHORT_QUERY_TOKEN_LIMIT과 함께 넓혀서
 // "삼성 냉장고 스탠드형"처럼 짧지만 구체성이 붙기 시작한 질의도 AI 상세검색
 // (카테고리별 동적 facet)을 먼저 시도하도록 한다.
-const HAS_DIGIT_PATTERN = /\d/;
-
+//
+// 숫자 배척 제거(2026-08-26, 사용자 리포트 - "아이폰 17을 쳤을 때 옵션을
+// 선택해야 하지 않나?") - "17"은 모델명일 뿐 용량/색상은 안 정해져 있어
+// 여전히 되물어야 하는데, 예전엔 숫자가 있다는 이유만으로 이 API 호출
+// 자체를 건너뛰었다. "우유 2개"/"2만원대" 같은 진짜 구체적인 숫자(수량·
+// 가격조건)는 백엔드의 is_bulk_query/extract_price_range가 정확하게
+// 가려내 facets: []로 응답하므로, 여기서 다시 숫자를 걸러낼 필요가 없다 -
+// 이 프리필터는 "명백히 애매하지 않은 질의만 호출을 건너뛴다"는 위 원칙대로
+// 토큰 수만 본다(그 외 케이스는 왕복 한 번 더 하는 정도의 비용만 든다).
 export function looksAmbiguous(query: string): boolean {
   const trimmed = query.trim();
   if (!trimmed) return false;
   const tokens = trimmed.split(/\s+/);
-  return tokens.length <= 4 && !HAS_DIGIT_PATTERN.test(trimmed);
+  return tokens.length <= 4;
 }
 
 // baseQuery(2026-08-13, "조금 더 빠르게" 요청) - 드릴다운 중(예: "핸드폰" ->
