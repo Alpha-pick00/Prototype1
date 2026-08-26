@@ -160,7 +160,7 @@ def test_run_elevenst_only_debate_drops_reasoning_that_leaks_internal_index(monk
     result = asyncio.run(debate.run_elevenst_only_debate("찾는 상품"))
 
     assert "index" not in result.decision.reasoning.lower()
-    assert result.decision.reasoning == "11번가 실측 검증 후보 중 추천 Agent(Qwen)가 선택"
+    assert result.decision.reasoning == "11번가 실측 검증 후보 중 추천 Agent(HCX)가 선택"
 
 
 def test_run_elevenst_only_debate_uses_candidate_notes_for_proposal_reasoning(monkeypatch):

@@ -46,16 +46,27 @@ def _item(name: str, price: int = 1000, code: str = "1") -> ElevenstSearchItem:
 
 def test_search_candidates_does_not_rescue_when_relevant_items_already_found(monkeypatch):
     """평소(대부분의) 검색은 보정 검색이 아예 안 걸려야 한다 - 추가 지연/
-    비용이 생기면 안 된다."""
+    비용이 생기면 안 된다.
+
+    상품명은 _ACCESSORY_INDICATOR_TOKENS(price_table.py)와 안 겹치는 상품으로
+    고른다 - 원래 픽스처(이어버드)는 "이어버드"가 그 목록에 실제 액세서리
+    낱말로도 들어있어(이어폰/헤드폰과 함께, 케이스에 담긴 이어폰처럼 진짜
+    액세서리일 때 잡으려는 용도), 정상적으로 관련 상품이 있어도
+    most_candidates_look_like_accessories가 True가 되어버려 이 테스트의
+    전제("보정 검색이 필요 없다")와 충돌한다(2026-08-26 실측, _search_candidates에
+    "relevant가 비면 원본 items로도 한 번 더 판정" 보정 로직을 추가하며 발견 -
+    그 전엔 "버즈 3"(질의 "버즈3"와 띄어쓰기가 달라 token_set_ratio 75점으로
+    _product_name_matches 자체가 False)라는 별개의 이유로 relevant가 우연히
+    비어 있었던 덕에 이 테스트가 의도와 다른 경로로 우연히 통과하고 있었다)."""
     calls = []
 
     async def _fake_search(query, limit=5, sort_cd="A"):
         calls.append(sort_cd)
-        return [_item("삼성 갤럭시 버즈 3 무선 이어버드", price=225800)]
+        return [_item("LG 그램 17 2026년형 코어 울트라 512GB 노트북", price=1890000)]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
 
-    result = asyncio.run(_search_candidates("삼성 갤럭시 버즈3", base_query=None))
+    result = asyncio.run(_search_candidates("LG 그램 17", base_query=None))
 
     assert calls == ["A"]
     assert len(result) == 1

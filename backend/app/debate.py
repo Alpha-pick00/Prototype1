@@ -78,12 +78,25 @@ async def _search_candidates(
     if base_query and base_query.strip() and base_query.strip() != query.strip():
         items = await elevenst.search_elevenst(base_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT)
         if facet_answers:
-            return _filter_items_by_facet_answers(items, facet_answers)
+            return _filter_items_by_facet_answers(items, facet_answers, query)
         return _filter_items_by_extra_terms(items, query, base_query)
 
     items = await elevenst.search_elevenst(query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT)
     relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
-    if force_price_rescue or price_table_module.most_candidates_look_like_accessories(query, relevant):
+    # relevant가 아예 비어버리는 경우(2026-08-26 실측, "아이폰 17" 그대로 재현) -
+    # "A"(가격순) 30개 전부가 ACCESSORY_TERMS 단어(케이스 등)를 달고 있어
+    # _product_name_matches에서 전원 탈락하면, most_candidates_look_like_
+    # accessories(query, relevant)는 빈 리스트에 무조건 False를 주므로(트리거
+    # 오탐 방지용 설계) 정작 가장 필요한 순간에 보정검색이 안 걸린다. 이때는
+    # relevant 대신 필터 전 원본 items로 같은 판정을 한 번 더 해본다 - "전부
+    # 탈락했다"는 "액세서리 낱말이 흔했다"는 신호와 다르므로(단순히 무관한
+    # 카테고리라 하나도 안 겹칠 수도 있다) force_price_rescue처럼 무조건
+    # 켜지는 않고, 원본 표본 자체가 실제로 액세서리 낱말투성이일 때만 켠다.
+    if (
+        force_price_rescue
+        or price_table_module.most_candidates_look_like_accessories(query, relevant)
+        or (not relevant and price_table_module.most_candidates_look_like_accessories(query, items))
+    ):
         high_price_items = await elevenst.search_elevenst(
             query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT, sort_cd="H"
         )
@@ -214,11 +227,13 @@ async def _search_and_rank_candidates(
         raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다.")
 
     if price_min is None and price_max is None:
-        return query, await _rank_by_relevance(query, relevant), None
+        ranked = await _rank_by_relevance(query, relevant)
+        return query, price_table_module.deprioritize_suspicious(ranked), None
 
     in_range = [it for it in relevant if _price_in_range(it["price_krw"], price_min, price_max)]
     if in_range:
-        return query, await _rank_by_relevance(query, in_range), None
+        ranked = await _rank_by_relevance(query, in_range)
+        return query, price_table_module.deprioritize_suspicious(ranked), None
 
     # 가격 조건에 맞는 후보가 없다 - 가격이 가장 가까운 순으로 정렬해 반환한다
     # (임베딩 관련도 재정렬은 하지 않는다 - 여기서는 "가격이 가장 가깝다"가
@@ -229,10 +244,18 @@ async def _search_and_rank_candidates(
 
 
 def _build_decision(
-    ranked: list[elevenst.ElevenstSearchItem], recommended: tuple[int, str] | None
+    ranked: list[elevenst.ElevenstSearchItem],
+    recommended: tuple[int, str] | None,
+    model_label: str,
 ) -> Decision:
-    """추천 Agent(gpt.recommend_best) 결과로 최종 추천(Decision)을 만든다.
-    실패하면(키 없음·API 오류) 최저가 규칙 기반으로 폴백한다."""
+    """추천 Agent(judge/recommend 단계) 결과로 최종 추천(Decision)을 만든다.
+    실패하면(키 없음·API 오류) 최저가 규칙 기반으로 폴백한다.
+
+    model_label(2026-08-26) - 호출부가 둘로 갈렸다: adk_pipeline.py의 judge
+    단계는 Qwen을 직접 부르고(gpt.py를 안 거침), debate.py의 gpt.recommend_best는
+    Qwen 쿼터 소진으로 임시 HCX를 쓴다(agents/gpt.py 모듈 docstring 참고) - 실제
+    호출한 모델이 서로 달라 이 함수 하나에 라벨을 고정할 수 없다. 각 호출부가
+    자기가 실제로 부른 모델명을 넘긴다."""
     if recommended is not None:
         index, llm_reasoning = recommended
         best = ranked[index]
@@ -244,9 +267,9 @@ def _build_decision(
         if _REASONING_LEAKS_INTERNAL_INDEX_RE.search(llm_reasoning):
             llm_reasoning = ""
         reasoning = (
-            f"11번가 실측 검증 후보 중 추천 Agent(Qwen)가 선택 - {llm_reasoning}"
+            f"11번가 실측 검증 후보 중 추천 Agent({model_label})가 선택 - {llm_reasoning}"
             if llm_reasoning
-            else "11번가 실측 검증 후보 중 추천 Agent(Qwen)가 선택"
+            else f"11번가 실측 검증 후보 중 추천 Agent({model_label})가 선택"
         )
     else:
         best = min(ranked, key=lambda it: it["price_krw"])
@@ -361,7 +384,7 @@ async def run_elevenst_only_debate(
             gpt.recommend_best(query, ranked),
             gpt.candidate_notes(query, ranked),
         )
-        decision = _build_decision(ranked, recommended)
+        decision = _build_decision(ranked, recommended, model_label="HCX")
     proposals = _build_proposals(ranked, notes)
     return DecideResponse(query=query, proposals=proposals, decision=decision)
 
@@ -396,7 +419,7 @@ async def run_elevenst_only_debate_stream(
     else:
         notes_task = asyncio.create_task(gpt.candidate_notes(query, ranked))
         recommended = await gpt.recommend_best(query, ranked)
-        decision = _build_decision(ranked, recommended)
+        decision = _build_decision(ranked, recommended, model_label="HCX")
 
     proposals = _build_proposals(ranked, {})
     result = DecideResponse(query=query, proposals=proposals, decision=decision)
@@ -448,7 +471,7 @@ def _filter_items_by_extra_terms(
 
 
 def _filter_items_by_facet_answers(
-    items: list[elevenst.ElevenstSearchItem], facet_answers: dict[str, list[str]]
+    items: list[elevenst.ElevenstSearchItem], facet_answers: dict[str, list[str]], query: str
 ) -> list[elevenst.ElevenstSearchItem]:
     """다중 선택 지원(2026-08-24, "하나밖에 선택을 못하는데 여러개 선택할 수
     있게") - facet_answers는 {facet 라벨: [선택값, ...]}. 같은 facet 안에서
@@ -456,7 +479,41 @@ def _filter_items_by_facet_answers(
     다른 facet끼리는 _filter_items_by_extra_terms와 같은 AND(모든 facet을
     만족해야 통과)로 좁힌다. _filter_items_by_extra_terms처럼 순수 로컬
     필터링(추가 네트워크 요청 없음)이고, 결과가 너무 적으면(표본이 좁아
-    facet 품질이 나빠질 수 있음) 필터링을 포기하고 원래 표본을 그대로 쓴다."""
+    facet 품질이 나빠질 수 있음) 필터링을 포기하고 원래 표본을 그대로 쓴다.
+
+    관련성 가드(2026-08-25 사용자 리포트 - "아이폰 17 256GB 자급제"를 facet으로
+    좁혀도 카메라 렌즈 보호필름/케이스/심지어 무선마이크까지 추천됨) - 이
+    필터는 원래 facet 값이 상품명에 있는지만 보는 순수 키워드 매칭이었는데,
+    액세서리 상품이 노출을 노리고 제목에 "아이폰17", "17Pro Max"처럼 온갖
+    모델명을 다 나열해두면(실측 확인) 그 키워드들이 전부 매칭돼버려 그대로
+    통과했다. 처음엔 accessory_mismatch(케이스류 단어 블랙리스트)만 추가로
+    걸었는데, 그 방식은 "무선마이크"처럼 목록에 없는 액세서리 종류가 나올
+    때마다 단어를 계속 추가해야 하는 두더지 잡기라 근본 해결이 아니다(실측
+    확인 - 마이크 상품명엔 케이스류 단어가 하나도 없어 accessory_mismatch를
+    그냥 통과했다).
+
+    그래서 단어 블랙리스트 대신, 단발 검색 경로에서 이미 검증된 종합 판정인
+    _product_name_matches를 그대로 재사용한다 - rapidfuzz token_set/sort_ratio
+    (질의 대비 상품명이 얼마나 도배됐는지까지 반영, 액세서리 상품명은 보통
+    호환 기종을 잔뜩 나열해 늘어지므로 자연히 낮은 점수), model_or_quantity_
+    conflict, exclusive_tokens_conflict, accessory_mismatch를 전부 포함하는
+    더 강한 가드라 케이스뿐 아니라 마이크 같은 임의의 액세서리 종류에도
+    일반적으로 적용된다(같은 함수가 이 세션에서 "아이폰 17 256GB 자급제"
+    단발 검색 19개 후보 전부를 정확히 걸러낸 걸 실측 확인함).
+
+    이 가드는 아래 "결과가 너무 적으면 포기" 로직보다 먼저, 그리고 그 로직과
+    무관하게 적용해야 한다(실측 확인된 두 번째 버그) - facet 값(예: "자급제")이
+    이 90개 표본의 어느 상품명에도 문자 그대로 등장하지 않으면(실제로 자주
+    있음 - 표기가 다르거나 다들 생략) filtered가 MIN_FILTERED_CLARIFY_ITEMS
+    미만이 되어 통째로 "포기하고 원래 표본"으로 돌아가는데, 관련성 가드를
+    filtered 안쪽에서만 걸면 그 "포기" 분기가 무관한 상품까지 전부
+    되살려버린다(실측: 아이폰 케이스 90개 중 89개가 그대로 부활). facet
+    매칭이 실패해 포기하더라도 "이건 아예 다른 상품"이라는 판정만은 절대
+    무를 수 없는 더 강한 신호이므로, 먼저 items 자체에서 걸러낸 뒤에만 그
+    위에서 facet 매칭 성공/포기를 따진다."""
+    items = [
+        item for item in items if price_table_module._product_name_matches(query, item["product_name"])
+    ]
     groups = [
         [_normalize_for_match(v) for v in values] for values in facet_answers.values() if values
     ]
@@ -970,7 +1027,7 @@ async def check_clarify_facets(
     # 나간다(순서는 _facet_sort_key가 매 라운드 표본 기준으로 동적으로 정한다).
     if base_query and base_query.strip() and base_query.strip() != query.strip():
         items = (
-            _filter_items_by_facet_answers(items, facet_answers)
+            _filter_items_by_facet_answers(items, facet_answers, query)
             if facet_answers
             else _filter_items_by_extra_terms(items, query, base_query)
         )

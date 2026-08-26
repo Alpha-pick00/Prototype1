@@ -1,5 +1,8 @@
 import json
 import re
+from collections import Counter
+
+from ..price_table import has_contract_suspicion_phrase, is_price_suspicious, median_price
 
 RECOMMEND_INSTRUCTIONS = (
     "당신은 검증된 쇼핑 후보 중 사용자에게 가장 추천할 만한 상품 하나를 고르는 "
@@ -8,6 +11,18 @@ RECOMMEND_INSTRUCTIONS = (
     "구매만족도·판매자를 함께 보고 판단하되, 가격 차이가 크지 않은 후보끼리는 "
     "리뷰가 많고 구매만족도가 높은 쪽을 우선하세요. 후보는 이미 질의와의 "
     "관련도 순으로 정렬돼 있습니다. "
+    "신제품 등 후보 전원의 리뷰 수·구매만족도가 0으로 동률이라 그것만으로 "
+    "구분이 안 되면, 각 후보 옆의 '동일 판매자 리스팅 수'를 대신 참고하세요 - "
+    "같은 판매자가 이 검색 결과 안에서 여러 건(다른 색상·용량 등)을 함께 팔고 "
+    "있으면 그만큼 자리 잡은 판매자라는 신호이므로, 리스팅이 단 1건뿐인 "
+    "무명 판매자보다 우선하세요(가격이 지나치게 더 비싸지지만 않는다면). "
+    "'⚠시세 대비 매우 저렴'/'⚠약정 가능성 문구 포함' 표시가 있는 후보는 "
+    "이미 이 목록 뒤쪽으로 밀려나 있습니다(각각 이 후보군 중앙값의 절반 "
+    "미만 가격이거나, 상품명에 '미개봉'/'완납'처럼 통신사 약정 상품에 흔한 "
+    "문구가 있다는 뜻 - 약정이 걸려있거나 미끼성 리스팅일 가능성이 있어 "
+    "일부러 후순위로 정렬해뒀습니다). 앞쪽에 표시 없는 후보가 있다면 그중에서 "
+    "고르고, 부득이 표시가 있는 후보를 고를 수밖에 없는 상황(그런 후보뿐인 "
+    "경우 등)이라면 reasoning에 왜 그런지도 밝히세요. "
     "반드시 아래 후보 목록의 index 중 하나를 골라 JSON으로만 답하세요. 다른 "
     "텍스트나 코드펜스를 덧붙이지 마세요.\n\n"
     "reasoning은 사용자에게 그대로 노출되는 문장입니다 - 아래 후보 목록의 "
@@ -19,9 +34,51 @@ RECOMMEND_INSTRUCTIONS = (
 )
 
 
+def _seller_listing_counts(candidates: list[dict]) -> Counter:
+    """이번 검색 결과 안에서 같은 판매자가 몇 건이나 팔고 있는지 센다(2026-08-25
+    사용자 리포트 - 리뷰 0건짜리 무명 판매자가, 같은 풀에 색상별로 8건이나
+    꾸준히 파는 판매자를 놔두고 선택됨). 아이폰 17처럼 방금 나온 신제품은
+    11번가 리스팅 전부가 아직 리뷰·구매만족도를 하나도 못 쌓은 경우가 흔해
+    (실측 확인) 그 두 신호로는 추천 Agent가 판매자를 구분할 방법이 없다.
+    11번가 오픈 API 자체가 "공식/인증 판매자" 같은 필드를 안 주므로, 대신
+    계산 가능한 대리 신호로 "이 검색 풀 안에서 리스팅이 여러 건인지"를 쓴다 -
+    완벽한 신뢰도 지표는 아니지만 최소한 리스팅 1건짜리 무명 판매자보다는
+    낫다는 합리적 가정."""
+    return Counter(c["seller"] for c in candidates)
+
+
+# 2026-08-25 사용자 리포트 - 위 판매자 리스팅 수 신호를 넣고 나니, 그
+# 신호만으로는 "같은 판매자가 시세보다 훨씬 싼 리스팅을 여러 건(색상별)
+# 올려둔 경우"를 못 걸렀다. 실제 판정(가격 중앙값 절반 미만, "미개봉"/
+# "완납" 문구)과 후보 정렬 자체는 app.price_table.deprioritize_suspicious가
+# 이미 debate.py 쪽에서 구조적으로 해뒀다(처음엔 여기 프롬프트 문구로만
+# "이런 후보는 피하라"고 경고했는데, HCX-005가 그 경고를 반복 무시하고
+# 순수 최저가만 골라서(같은 요청 2회 재현) 텍스트 경고를 아예 신뢰할 수
+# 없었다 - LLM 판단에 맡기지 않고 코드가 먼저 순서를 정해준다). 여기서는
+# 그 판정 함수를 그대로 재사용해 같은 표시를 프롬프트에도 보여주기만
+# 한다 - 이유(reasoning) 텍스트가 왜 이 순서인지 설명할 수 있도록.
+
+
+def _price_suspicion_note(price_krw: int, median: float) -> str:
+    if is_price_suspicious(price_krw, median):
+        return " ⚠시세 대비 매우 저렴"
+    return ""
+
+
+def _contract_suspicion_note(product_name: str) -> str:
+    if has_contract_suspicion_phrase(product_name):
+        return " ⚠약정 가능성 문구 포함"
+    return ""
+
+
 def build_recommend_prompt(query: str, candidates: list[dict]) -> str:
+    seller_counts = _seller_listing_counts(candidates)
+    median = median_price(candidates)
     lines = [
-        f"[{i}] {c['product_name']} / {c['price_krw']:,}원 / 판매자: {c['seller']} / "
+        f"[{i}] {c['product_name']} / {c['price_krw']:,}원"
+        f"{_price_suspicion_note(c['price_krw'], median)}"
+        f"{_contract_suspicion_note(c['product_name'])} / "
+        f"판매자: {c['seller']} (동일 판매자 리스팅 {seller_counts[c['seller']]}건) / "
         f"리뷰 {c.get('review_count')}건 / 구매만족도 {c.get('buy_satisfy')}"
         for i, c in enumerate(candidates)
     ]
@@ -39,7 +96,14 @@ def build_recommend_prompt(query: str, candidates: list[dict]) -> str:
 CANDIDATE_NOTES_INSTRUCTIONS = (
     "아래는 전부 실제 검색으로 존재가 확인된 쇼핑 후보입니다. 각 후보가 "
     "어떤 사람에게 괜찮은 선택인지 가격/리뷰/구매만족도/판매자 근거로 "
-    "1문장씩 설명하세요.\n\n"
+    "1문장씩 설명하세요. 리뷰·구매만족도가 후보 전원 0으로 동률이면(신제품 "
+    "등) '동일 판매자 리스팅 수'를 대신 참고해 판매자 신뢰도를 판단하세요 - "
+    "리스팅이 여러 건인 판매자가 1건뿐인 무명 판매자보다 자리 잡은 판매자일 "
+    "가능성이 높습니다. 가격 옆에 '⚠시세 대비 매우 저렴'이 표시된 후보는 "
+    "이 후보군 중앙값의 절반도 안 되는 값이고, '⚠약정 가능성 문구 포함'은 "
+    "상품명에 '미개봉'/'완납'처럼 통신사 약정 상품에 흔한 문구가 있다는 "
+    "뜻입니다 - 둘 다(또는 겹쳐서) 있으면 통신사 약정/미끼 리스팅일 "
+    "가능성이 있다는 점도 이유에 자연스럽게 반영하세요.\n\n"
     "이 문장은 사용자에게 그대로 노출됩니다 - 아래 후보 목록의 [0], [1] "
     "같은 대괄호 번호나 'index 3'처럼 내부 목록 순번을 절대 언급하지 "
     "마세요(사용자는 그 번호 매김을 본 적이 없습니다). 다른 후보를 "
@@ -50,8 +114,13 @@ CANDIDATE_NOTES_INSTRUCTIONS = (
 
 
 def build_candidate_notes_prompt(query: str, candidates: list[dict], note_indices: list[int]) -> str:
+    seller_counts = _seller_listing_counts(candidates)
+    median = median_price(candidates)
     lines = [
-        f"[{i}] {c['product_name']} / {c['price_krw']:,}원 / 판매자: {c['seller']} / "
+        f"[{i}] {c['product_name']} / {c['price_krw']:,}원"
+        f"{_price_suspicion_note(c['price_krw'], median)}"
+        f"{_contract_suspicion_note(c['product_name'])} / "
+        f"판매자: {c['seller']} (동일 판매자 리스팅 {seller_counts[c['seller']]}건) / "
         f"리뷰 {c.get('review_count')}건 / 구매만족도 {c.get('buy_satisfy')}"
         for i, c in enumerate(candidates)
         if i in note_indices

@@ -4,14 +4,34 @@ from ..config import settings
 from .base import build_candidate_notes_prompt, build_recommend_prompt, build_refine_query_prompt, parse_json_object
 
 # 이 모듈이 담당하는 에이전트 슬롯은 스키마/프론트엔드/테스트 전반에서
-# agent="gpt"로 식별된다(파일명·함수명도 그대로) - 하지만 실제로 호출하는
-# 모델은 Qwen이다. DashScope가 OpenAI SDK와 호환되는 엔드포인트를 제공해서,
-# openai SDK를 base_url만 바꿔 그대로 쓴다(agents/deepseek.py와 동일한
+# agent="gpt"로 식별된다(파일명·함수명도 그대로) - 원래 실제로 호출하는
+# 모델은 Qwen이었다(DashScope가 OpenAI SDK와 호환되는 엔드포인트를 제공해서,
+# openai SDK를 base_url만 바꿔 그대로 쓰는 방식 - agents/deepseek.py와 동일한
 # 패턴). agent="gpt" 식별자 자체를 "qwen"으로 바꾸지 않은 이유 - AgentName
 # 리터럴, DB에 저장된 과거 기록, 프론트엔드 타입, 테스트 픽스처 등 수십
 # 곳에 걸쳐 있어 그 리네임 자체가 훨씬 큰 변경이 된다. 사용자에게 보이는
 # 이름만 frontend/src/app/components/SearchResults.tsx의 AGENT_LABEL에서
 # "Qwen"으로 바꿔뒀다.
+#
+# 2026-08-25("qwen 토큰을 다써서 ... qwen역할을 잠깐 hcx로 바꿔줄래") - Qwen
+# (DashScope) 쿼터 소진으로 임시로 HCX(CLOVA Studio)를 호출하도록 바꿨다.
+# agent="gpt" 식별자·함수 시그니처는 그대로 두고 _client()/모델만 갈아
+# 끼웠다 - 나중에 Qwen 쿼터가 복구되면:
+#   1) _client()의 api_key/base_url을 settings.qwen_api_key/qwen_api_base로
+#   2) 아래 세 함수의 model=을 settings.qwen_model로
+#   3) response_format={"type": "json_object"}를 다시 추가(Qwen은 지원하지만
+#      HCX의 OpenAI 호환 엔드포인트는 json_object를 지원 안 해 지금은 뺐다 -
+#      agents/hcx.py 주석 참고, 프롬프트 지시 + parse_json_object 파싱으로 대신함)
+#   4) extra_body=_DISABLE_THINKING을 다시 추가(HCX엔 이 DashScope 전용
+#      파라미터가 없어 지금은 뺐다)
+#   5) debate.py의 두 _build_decision(...) 호출부에 넘기는
+#      model_label="HCX"도 "Qwen"으로 같이 되돌릴 것 - 사용자에게 보이는
+#      라벨이라 실제 제공자와 어긋나면 안 됨(adk_pipeline.py 호출부는 judge
+#      단계가 애초에 Qwen을 직접 부르므로 그대로 둘 것)
+# 로 되돌리면 된다. embeddings.py(관련도 정렬·의미 유사도 구제)는 이번 스왑
+# 범위 밖이다 - 그쪽은 Qwen 호출이 실패해도 이미 안전하게 폴백하도록
+# 짜여 있어(임베딩 실패 시 원본 순서 유지/의미 구제 건너뛰기) 당장 끊길
+# 위험이 없다고 판단했다.
 
 
 # 2026-08-24 실측 - 호출마다 AsyncOpenAI를 새로 만들면 매번 TCP/TLS
@@ -26,9 +46,11 @@ def _client() -> AsyncOpenAI:
     # max_retries=0 - 사용자 요청(2026-08-15: "너무
     # 느려 더 빠르게"). 실패해도 호출부가 이미 폴백을 갖고 있어 SDK 재시도로
     # 얻는 이득보다 지연 비용이 크다.
+    # 2026-08-25 - 임시로 HCX(CLOVA Studio)를 가리킨다(위 모듈 docstring
+    # 참고) - 되돌릴 땐 settings.qwen_api_key/qwen_api_base로.
     global _client_instance
     if _client_instance is None:
-        _client_instance = AsyncOpenAI(api_key=settings.qwen_api_key, base_url=settings.qwen_api_base, max_retries=0)
+        _client_instance = AsyncOpenAI(api_key=settings.hcx_api_key, base_url=settings.hcx_api_base, max_retries=0)
     return _client_instance
 
 
@@ -36,7 +58,9 @@ def _client() -> AsyncOpenAI:
 # 다 생성한 뒤에야 응답을 반환)가 켜져 있다(2026-08-20 실측 - enable_thinking을
 # 안 주면 단순 질문 하나에도 20~95초가 걸린다, extra_body={"enable_thinking":
 # False}를 주면 2초로 줄어든다). 이 프로젝트가 쓰는 프롬프트는 전부 JSON 한
-# 덩어리만 필요해서 추론 과정 자체가 필요 없다 - 이 모듈의 모든 호출에 끈다.
+# 덩어리만 필요해서 추론 과정 자체가 필요 없다 - Qwen을 다시 쓰게 되면 이
+# 모듈의 세 호출 모두에 extra_body=_DISABLE_THINKING을 다시 붙일 것(HCX엔
+# 없는 DashScope 전용 파라미터라 지금은 안 쓴다).
 _DISABLE_THINKING = {"enable_thinking": False}
 
 
@@ -53,10 +77,8 @@ async def refine_query(query: str) -> str | None:
     try:
         client = _client()
         response = await client.chat.completions.create(
-            model=settings.qwen_model,
+            model=settings.hcx_recommend_model,
             messages=[{"role": "user", "content": build_refine_query_prompt(stripped)}],
-            response_format={"type": "json_object"},
-            extra_body=_DISABLE_THINKING,
         )
         data = parse_json_object(response.choices[0].message.content or "")
         refined = str(data.get("query") or "").strip()
@@ -82,10 +104,8 @@ async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str] 
     try:
         client = _client()
         response = await client.chat.completions.create(
-            model=settings.qwen_model,
+            model=settings.hcx_recommend_model,
             messages=[{"role": "user", "content": build_recommend_prompt(query, candidates)}],
-            response_format={"type": "json_object"},
-            extra_body=_DISABLE_THINKING,
         )
         data = parse_json_object(response.choices[0].message.content or "")
         index = int(data.get("index"))
@@ -115,10 +135,8 @@ async def candidate_notes(query: str, candidates: list[dict]) -> dict[int, str]:
     try:
         client = _client()
         response = await client.chat.completions.create(
-            model=settings.qwen_model,
+            model=settings.hcx_recommend_model,
             messages=[{"role": "user", "content": build_candidate_notes_prompt(query, candidates, note_indices)}],
-            response_format={"type": "json_object"},
-            extra_body=_DISABLE_THINKING,
         )
         data = parse_json_object(response.choices[0].message.content or "")
         notes: dict[int, str] = {}

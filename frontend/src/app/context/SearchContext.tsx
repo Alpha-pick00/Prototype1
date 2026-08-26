@@ -280,6 +280,25 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
       // 실패해도(.catch) 조용히 원래 검색으로 넘어간다 - AI 상세검색은 있으면
       // 좋은 보조 기능이지 필수 경로가 아니다. 후속 턴(skipIntentCheck)에서는
       // 이미 한 축을 답했으므로 다시 묻지 않는다.
+      // 중복 정제 호출 제거(2026-08-25, lsm 브랜치에서 이식) - checkClarifyFacets가
+      // 이미 대화체 질의를 정제해서 clarify.query로 돌려주는데(app/debate.py::
+      // check_clarify_facets의 _maybe_refine_query), facets가 비어 원래 검색으로
+      // 넘어갈 때 requestQuery(정제 전 원문)를 그대로 decideStream에 보내면
+      // run_elevenst_only_debate_stream 내부의 _maybe_refine_query가 같은 질의를
+      // 또 한 번 LLM으로 정제한다 - 이미 정제된 clarify.query를 재사용하면
+      // looks_conversational_query가 더 이상 안 걸려(정제 결과엔 "사고싶어" 같은
+      // 구매 의도 문구가 안 남음) 이 두 번째 호출이 자연히 생략된다.
+      //
+      // effectiveBaseQuery도 같이 갱신해야 한다 - 첫 턴엔 baseQuery가 requestQuery와
+      // 같은 문자열인데(newTurn 참고), query만 갱신하고 baseQuery는 원문 그대로
+      // 보내면 서버의 _refine_base_query가 "base_query !== original_query"로 오판해
+      // (원문 vs 정제문 비교가 되어버림) base_query를 또 한 번 별도로 정제해버린다 -
+      // 결국 호출 위치만 바뀔 뿐 LLM 호출 수는 그대로다. 서버와 같은 조건
+      // (drilldown 전엔 baseQuery===requestQuery)으로 여기서도 같이 정제문으로
+      // 맞춰줘야 진짜로 호출이 하나 줄어든다. 진짜 드릴다운(baseQuery가 원래부터
+      // requestQuery와 다름)이면 그대로 둔다 - 서버가 그 base_query를 알아서 정제한다.
+      let searchQuery = requestQuery;
+      let effectiveBaseQuery = baseQuery;
       if (!skipIntentCheck && looksAmbiguous(requestQuery)) {
         const persona = { ...sessionPreferences, ...personaOverride };
         const clarify = await checkClarifyFacets(
@@ -293,12 +312,18 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
           patchTurn(id, { status: 'result', result: clarify });
           return;
         }
+        if (clarify) {
+          searchQuery = clarify.query;
+          if (baseQuery && baseQuery.trim() === requestQuery.trim()) {
+            effectiveBaseQuery = clarify.query;
+          }
+        }
       }
 
       let finalResult: DecideResult | null = null;
       let streamError: string | null = null;
       await decideStream(
-        requestQuery,
+        searchQuery,
         (event) => {
           if (event.type === 'status') {
             patchTurn(id, { streamingStage: event.stage });
@@ -323,7 +348,7 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
           }
         },
         undefined,
-        baseQuery,
+        effectiveBaseQuery,
         facetAnswers
       );
 

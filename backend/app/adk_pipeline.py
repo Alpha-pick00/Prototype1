@@ -246,6 +246,13 @@ class _FilterMergeNode(BaseAgent):
             raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다.")
 
         ranked = await _rank_by_relevance(query, relevant)
+        # 2026-08-25 사용자 리포트("왜 200만원 넘는걸 추천한거지? 리뷰도 없고?")
+        # 대응 - 의심스러운(중앙값 대비 파격 저가·"미개봉"/"완납" 문구) 후보를
+        # 뒤로 미룬다. 프롬프트 경고 문구만으로는(agents/base.py) HCX-005가
+        # 반복 무시하고 순수 최저가만 골라(같은 요청 2회 재현) 코드로 순서
+        # 자체를 정해준다 - debate.py._search_and_rank_candidates와 동일한
+        # 위치(관련도 랭킹 직후, recommend/judge 단계 전)에 적용한다.
+        ranked = price_table_module.deprioritize_suspicious(ranked)
         yield Event(author=self.name, actions=EventActions(state_delta={"ranked_items": ranked}))
 
 
@@ -667,7 +674,7 @@ async def run_stream(
         yield {"type": "error", "message": f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다."}
         return
 
-    decision = _build_decision(ranked, _judge_recommended(state))
+    decision = _build_decision(ranked, _judge_recommended(state), model_label="Qwen")
     result = DecideResponse(
         query=state.get("resolved_query", query),
         proposals=proposals_raw,

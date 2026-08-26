@@ -59,3 +59,31 @@ def exclusive_tokens_conflict(name_a: str, name_b: str) -> bool:
         if present_a and present_b and present_a.isdisjoint(present_b):
             return True
     return False
+
+
+# 기기 "본체"를 찾는 질의에 그 기기용 "부속품"이 섞여 나오는 문제(2026-08-25
+# 사용자 리포트 - "아이폰 17 256gb 자급제" 검색에 "아이폰 15 케이스"가 추천됨).
+# 위 EXCLUSIVE_GROUPS는 양쪽 다 그룹 원소가 있어야만 비교하는 대칭 규칙이라
+# (예: 백미 vs 현미는 보통 양쪽 다 쌀 종류를 적는다) 이 케이스엔 안 맞는다 -
+# 액세서리 상품명은 케이스/충전기 같은 단어를 항상 쓰지만, 정작 본체를 찾는
+# 질의("아이폰 17 256gb 자급제")는 그런 단어를 아예 안 쓰기 때문에(대칭이
+# 아니라 한쪽에만 신호가 있음) 기존 방식으로는 아무 후보도 안 걸린다. 그래서
+# 이건 "후보에만 있으면 충돌"인 비대칭 판정으로 따로 둔다 - 질의가 실제로
+# 액세서리를 찾고 있으면(질의 자체에 이 단어가 있으면) 당연히 충돌 아님.
+ACCESSORY_TERMS: set[str] = {
+    "케이스", "커버", "필름", "강화유리", "충전기", "케이블", "거치대",
+    "홀더", "파우치", "스트랩", "그립톡", "보호대",
+    # 케이스 형태 설명(실측: "지갑형 더블 버튼 카드 슬롯 스탠드"처럼 상품명이
+    # "케이스"라는 단어 자체는 안 쓰고 형태만 설명하는 경우가 흔하다) - 위
+    # 단어 목록만으론 못 걸러 accessory_mismatch가 뚫렸다(2026-08-25 실측).
+    "지갑형", "다이어리형", "다이어리케이스", "북케이스", "플립커버",
+}
+
+
+def accessory_mismatch(query: str, candidate_name: str) -> bool:
+    """query는 액세서리를 찾는 게 아닌데(위 단어가 하나도 없는데) candidate_name엔
+    있으면 True - 기기 본체를 찾는 질의에 그 기기용 부속품이 새어 들어온
+    것으로 본다."""
+    if any(term in query for term in ACCESSORY_TERMS):
+        return False
+    return any(term in candidate_name for term in ACCESSORY_TERMS)

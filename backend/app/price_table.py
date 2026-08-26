@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import statistics
 
 from rapidfuzz import fuzz
 
@@ -12,7 +13,7 @@ from fetchers import elevenst
 from fusion.dedup import NAME_SIMILARITY_THRESHOLD
 
 from . import embeddings
-from .exclusive_tokens import exclusive_tokens_conflict
+from .exclusive_tokens import accessory_mismatch, exclusive_tokens_conflict
 from .spec_match import model_or_quantity_conflict
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,12 @@ def _product_name_matches(decision_name: str, candidate_name: str) -> bool:
     # 공통 토큰이 많으면 이런 차이를 그냥 덮어버린다(실측 93.0점, 85 통과).
     if exclusive_tokens_conflict(decision_name, candidate_name):
         return False
+    # 기기 본체를 찾는데 그 기기용 케이스/충전기 등 부속품이 섞여 나오는 경우
+    # (2026-08-25 사용자 리포트 - "아이폰 17 256gb 자급제"에 "아이폰 15 케이스"
+    # 추천됨). exclusive_tokens_conflict와 달리 질의 쪽엔 신호가 없는 게
+    # 정상이라 비대칭으로 따로 판정한다.
+    if accessory_mismatch(decision_name, candidate_name):
+        return False
     return True
 
 
@@ -189,8 +196,9 @@ async def semantic_relevance_fallback(
 ) -> list[elevenst.ElevenstSearchItem]:
     """_product_name_matches가 하나도 못 찾았을 때만 쓰는 2차 관련성 판정
     (app.debate._search_and_rank_candidates 참고) - 순수 의미 유사도만으로는
-    모델/수량/배타 속성 차이(예: 아이폰6 vs 아이폰15, 백미 vs 현미)를 못
-    잡으므로, 기존 가드(model_or_quantity_conflict, exclusive_tokens_conflict)는
+    모델/수량/배타 속성 차이(예: 아이폰6 vs 아이폰15, 백미 vs 현미)나 본체 vs
+    부속품 차이(예: 아이폰 자체 vs 아이폰 케이스)를 못 잡으므로, 기존 가드
+    (model_or_quantity_conflict, exclusive_tokens_conflict, accessory_mismatch)는
     그대로 적용해서 통과시킨다 - 표기 차이는 구제하되 진짜 다른 상품까지
     구제하지 않기 위함."""
     if not items:
@@ -209,5 +217,56 @@ async def semantic_relevance_fallback(
             continue
         if exclusive_tokens_conflict(query, name):
             continue
+        if accessory_mismatch(query, name):
+            continue
         matches.append(it)
     return matches
+
+
+# 2026-08-25 사용자 리포트("말이 안되는 가격을 추천하면 안되겠지?... 왜
+# 200만원이 넘는걸 추천한거지?" 이후, "왜 이제 75만원짜리를 추천하냐"로
+# 이어진 케이스) - 아이폰 17처럼 막 나온 신제품은 11번가 리스팅 전부가
+# 리뷰·구매만족도 0으로 동률인 경우가 흔해(실측 확인) recommend Agent가
+# 그 두 신호로 판매자를 구분할 방법이 없다. 처음엔 이 판정을 프롬프트에
+# 경고 문구로만 얹었는데(agents/base.py), HCX-005가 그 문구를 반복
+# 무시하고 순수 최저가만 골랐다(같은 요청 2회 재현, 매번 동일 후보 선택) -
+# 텍스트 경고로는 이 모델을 못 믿는다는 뜻이라, 아예 이 신호를 코드에서
+# 구조적으로 반영한다(agents/base.py가 프롬프트 표시용으로 재사용).
+_SUSPICIOUS_PRICE_RATIO = 0.5
+
+# "미개봉"/"완납"은 정상적인 자급제 새 제품에도 쓰이는 말이라(100% 확실한
+# 신호는 아님) 완전 배제가 아니라 후순위화 근거로만 쓴다.
+_CONTRACT_SUSPICION_TERMS = ("미개봉", "완납")
+
+
+def median_price(items: list[elevenst.ElevenstSearchItem]) -> float:
+    prices = [it["price_krw"] for it in items]
+    return statistics.median(prices) if prices else 0.0
+
+
+def is_price_suspicious(price_krw: int, median: float) -> bool:
+    return median > 0 and price_krw < median * _SUSPICIOUS_PRICE_RATIO
+
+
+def has_contract_suspicion_phrase(product_name: str) -> bool:
+    return any(term in product_name for term in _CONTRACT_SUSPICION_TERMS)
+
+
+def is_trust_suspicious(item: elevenst.ElevenstSearchItem, median: float) -> bool:
+    """가격이 이 후보군 중앙값의 절반 미만이거나(is_price_suspicious), 상품명에
+    통신사 약정 상품에 흔한 문구가 있으면(has_contract_suspicion_phrase) True."""
+    return is_price_suspicious(item["price_krw"], median) or has_contract_suspicion_phrase(item["product_name"])
+
+
+def deprioritize_suspicious(
+    items: list[elevenst.ElevenstSearchItem],
+) -> list[elevenst.ElevenstSearchItem]:
+    """의심스러운 후보를 완전히 배제하지 않고 뒤로 미룬다 - 전부 의심스러우면
+    (예: 이 검색어 자체가 원래 파격 세일 상품군) 안정 정렬 특성상 결과가
+    그대로 유지되므로, 후보가 하나도 안 남는 사고가 나지 않는다. 각 그룹
+    안에서는 기존 순서(임베딩 관련도순)를 그대로 유지한다(list.sort는
+    안정 정렬)."""
+    if not items:
+        return items
+    median = median_price(items)
+    return sorted(items, key=lambda it: is_trust_suspicious(it, median))
