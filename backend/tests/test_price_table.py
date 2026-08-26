@@ -112,3 +112,43 @@ def test_semantic_relevance_fallback_returns_empty_when_embedding_unavailable(mo
 
 def test_semantic_relevance_fallback_returns_empty_for_no_items():
     assert asyncio.run(price_table.semantic_relevance_fallback("망고주스", [])) == []
+
+
+# ---------------------------------------------------------------------------
+# all_candidates_look_like_accessories / _dedupe_by_product_code (2026-08-26,
+# "아이폰 17" 실측 - 추천도순 표본이 전부 액세서리였던 문제의 로컬 트리거)
+# ---------------------------------------------------------------------------
+
+
+def test_all_candidates_look_like_accessories_true_when_every_item_is_accessory():
+    items = [
+        _item("마그세이프 폰 마운트 그립 홀더 아이폰 17 용"),
+        _item("베이스어스 핑거 링 홀더 아이폰 17 에어"),
+    ]
+    assert price_table.all_candidates_look_like_accessories("아이폰 17", items) is True
+
+
+def test_all_candidates_look_like_accessories_false_when_one_item_is_not():
+    items = [
+        _item("마그세이프 폰 마운트 그립 홀더 아이폰 17 용"),
+        _item("Apple 아이폰 17 프로 맥스 2TB 자급제"),
+    ]
+    assert price_table.all_candidates_look_like_accessories("아이폰 17", items) is False
+
+
+def test_all_candidates_look_like_accessories_false_for_empty_list():
+    assert price_table.all_candidates_look_like_accessories("아이폰 17", []) is False
+
+
+def test_all_candidates_look_like_accessories_false_when_query_itself_wants_accessory():
+    """"아이폰 케이스"를 검색했으면 결과가 전부 케이스인 게 정상이다 - 이때는
+    보정 검색을 태우면 안 된다."""
+    items = [_item("아이폰 17 실리콘 케이스")]
+    assert price_table.all_candidates_look_like_accessories("아이폰 케이스", items) is False
+
+
+def test_dedupe_by_product_code_removes_duplicates_keeping_first():
+    items = [_item("A", code="1"), _item("A 중복", code="1"), _item("B", code="2")]
+    deduped = price_table._dedupe_by_product_code(items)
+    assert [it["product_code"] for it in deduped] == ["1", "2"]
+    assert deduped[0]["product_name"] == "A"

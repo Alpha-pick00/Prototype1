@@ -97,6 +97,54 @@ def _product_name_matches(decision_name: str, candidate_name: str) -> bool:
     return True
 
 
+# 2026-08-26 실측("아이폰 17" 검색 - 추천도순(sortCd=A) 표본 30개가 전부
+# "OO용 케이스/충전기/거치대"류였고 본품은 하나도 없었다. 인기·고가 상품은
+# 액세서리 판매자들이 표기에 상품명을 끼워 넣는 경우가 많은데, 가격 낮은
+# 것부터 잡히는 추천도순/오름차순에선 본품(비쌈)이 표본 밖으로 밀려난다) -
+# 관련성 필터를 통과한 후보 전부가 이 목록의 단어를 달고 있으면 "본품이
+# 표본에 없을 가능성이 높다"는 로컬 신호로 쓴다(네트워크/LLM 호출 없음).
+# 카테고리를 한정하는 하드 필터로는 못 쓴다(신발끈·리필 같은 다른 카테고리
+# 액세서리는 안 잡힌다 - 그건 challenge(DeepSeek)가 의미로 이미 일반적으로
+# 잡아준다) - 여기서는 "H(높은가격순) 보정 검색을 태울지" 판단하는 트리거로만
+# 쓴다. 트리거가 과하게(오탐으로) 걸려도 피해는 검색 1번 더 하는 정도라
+# 하드 필터보다 리스크가 훨씬 낮다.
+_ACCESSORY_INDICATOR_TOKENS = {
+    "케이스", "커버", "파우치", "스킨", "필름", "강화유리", "보호필름",
+    "거치대", "마운트", "홀더", "그립", "그립톡", "스탠드",
+    "충전기", "충전패드", "충전케이블", "케이블", "젠더", "어댑터",
+    "이어폰", "이어버드", "헤드폰", "헤드셋", "이어훅", "이어팁",
+    "스트랩", "고리", "범퍼", "젤리케이스", "하드케이스", "배터리",
+}
+
+
+def _looks_like_accessory(product_name: str) -> bool:
+    return any(token in product_name for token in _ACCESSORY_INDICATOR_TOKENS)
+
+
+def all_candidates_look_like_accessories(query: str, items: list[elevenst.ElevenstSearchItem]) -> bool:
+    """`_search_candidates`가 sortCd="H" 보정 검색을 태울지 판단하는 트리거.
+    질의 자체가 액세서리를 찾는 거면("아이폰 케이스") 트리거하지 않는다 -
+    그 경우 액세서리만 나오는 게 정상이다."""
+    if not items or _looks_like_accessory(query):
+        return False
+    return all(_looks_like_accessory(it["product_name"]) for it in items)
+
+
+def _dedupe_by_product_code(items: list[elevenst.ElevenstSearchItem]) -> list[elevenst.ElevenstSearchItem]:
+    """product_code 기준 중복 제거(없으면 url, 그마저 없으면 상품명) - 먼저
+    나온 항목을 남긴다. `_search_candidates`가 정렬이 다른 두 검색 결과를
+    합칠 때 같은 상품이 양쪽에 다 잡히는 경우를 정리한다."""
+    seen: set[str] = set()
+    deduped: list[elevenst.ElevenstSearchItem] = []
+    for item in items:
+        key = item.get("product_code") or item.get("url") or item.get("product_name", "")
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 # 2026-08-24 실측(사용자 리포트 "망고주스를 사고 싶어 검색이 안 됨") -
 # _product_name_matches는 공백으로 나눈 토큰이 문자 그대로 겹쳐야 점수가
 # 나온다. "망고주스"(질의, 붙여쓰기)와 11번가 실제 표기 "카프리썬 오렌지망고

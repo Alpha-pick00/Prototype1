@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+import asyncio
+
+from app import debate
 from app.debate import (
     _FACET_ORDER_HINTS,
     _attach_facet_crossfilter,
@@ -7,13 +12,77 @@ from app.debate import (
     _facet_sort_key,
     _is_ambiguous_facets,
     _resolved_facet_count,
+    _search_candidates,
     _strip_resolved_facets,
 )
 from app.schemas import ClarifyFacet
+from fetchers.elevenst import ElevenstSearchItem
 
 
 def _facet(label: str, options: list[str]) -> ClarifyFacet:
     return ClarifyFacet(label=label, options=options)
+
+
+def _item(name: str, price: int = 1000, code: str = "1") -> ElevenstSearchItem:
+    return ElevenstSearchItem(
+        product_code=code,
+        product_name=name,
+        price_krw=price,
+        seller="판매자",
+        url=f"https://www.11st.co.kr/products/{code}",
+        review_count=None,
+        buy_satisfy=None,
+        image_url=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# _search_candidates - sortCd="H" 보정 검색 트리거(2026-08-26, "아이폰 17"
+# 실측). 단발 질의(base_query 없음) 경로만 다룬다 - 드릴다운 경로는 구조적
+# 필터링이라 이 트리거 대상이 아니다.
+# ---------------------------------------------------------------------------
+
+
+def test_search_candidates_does_not_rescue_when_relevant_items_already_found(monkeypatch):
+    """평소(대부분의) 검색은 보정 검색이 아예 안 걸려야 한다 - 추가 지연/
+    비용이 생기면 안 된다."""
+    calls = []
+
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        calls.append(sort_cd)
+        return [_item("삼성 갤럭시 버즈 3 무선 이어버드", price=225800)]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    result = asyncio.run(_search_candidates("삼성 갤럭시 버즈3", base_query=None))
+
+    assert calls == ["A"]
+    assert len(result) == 1
+
+
+def test_search_candidates_rescues_with_high_price_sort_when_all_relevant_look_like_accessories(monkeypatch):
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        if sort_cd == "A":
+            return [_item("마그세이프 폰 마운트 그립 홀더 아이폰 17 용", price=14400, code="acc")]
+        return [_item("Apple 아이폰 17 프로 맥스 2TB 자급제", price=5500000, code="real")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+
+    codes = {it["product_code"] for it in result}
+    assert codes == {"acc", "real"}
+
+
+def test_search_candidates_dedupes_when_both_sorts_return_the_same_item(monkeypatch):
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        return [_item("마그세이프 폰 마운트 그립 홀더 아이폰 17 용", price=14400, code="acc")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+
+    assert [it["product_code"] for it in result] == ["acc"]
 
 
 def test_facet_resolved_true_when_option_already_in_query():

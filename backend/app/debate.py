@@ -45,6 +45,7 @@ async def _search_candidates(
     query: str,
     base_query: str | None,
     facet_answers: dict[str, list[str]] | None = None,
+    force_price_rescue: bool = False,
 ) -> list[elevenst.ElevenstSearchItem]:
     """HITL 드릴다운(2026-08-20 재설계, "쿼리 재구성해서 검색하는 거나
     다름없다" 지적) - base_query가 없으면(단발 질의) 그 질의로 좁게
@@ -58,13 +59,35 @@ async def _search_candidates(
 
     facet_answers(2026-08-24, 다중 선택 지원)가 있으면 그걸로 필터링한다(같은
     facet 안 값은 OR, facet끼리는 AND) - 없으면(구버전 요청) query/base_query
-    문자열 비교 기반의 기존 방식으로 폴백한다."""
+    문자열 비교 기반의 기존 방식으로 폴백한다.
+
+    단발 질의(드릴다운 없음)는 검색 후 자체 점검을 한 번 한다(2026-08-26,
+    "아이폰 17" 실측 - 추천도순 표본이 전부 액세서리였던 문제) - 관련성
+    필터를 통과한 후보가 전부 액세서리 지시어를 달고 있으면(로컬 판정,
+    추가 네트워크 호출 없음) sortCd="H"(높은가격순)로 한 번 더 검색해
+    합친다. 평소(대부분의 질의)는 이 보정 검색 자체가 안 걸려 지연/비용이
+    그대로다 - 문제가 실제로 감지될 때만 추가 요청 1번을 더 쓴다.
+
+    force_price_rescue(2026-08-26) - 로컬 액세서리 단어 목록은 카테고리
+    커버리지가 늘 부족하다(실측: "에반게리온 아이폰 케이스"의 "주변기기"는
+    목록에 없어 위 트리거를 못 태웠다). adk_pipeline.run_stream이 challenge
+    (DeepSeek, 카테고리 무관하게 의미로 판정)까지 다 돌려본 뒤 후보 전부가
+    verified=False로 나오면 이 플래그를 강제로 켜고 검색부터 한 번 더
+    돈다 - 단어 목록이 못 잡는 케이스까지 결국 걸러내는 두 번째 안전망."""
     if base_query and base_query.strip() and base_query.strip() != query.strip():
         items = await elevenst.search_elevenst(base_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT)
         if facet_answers:
             return _filter_items_by_facet_answers(items, facet_answers)
         return _filter_items_by_extra_terms(items, query, base_query)
-    return await elevenst.search_elevenst(query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT)
+
+    items = await elevenst.search_elevenst(query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT)
+    relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
+    if force_price_rescue or price_table_module.all_candidates_look_like_accessories(query, relevant):
+        high_price_items = await elevenst.search_elevenst(
+            query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT, sort_cd="H"
+        )
+        items = price_table_module._dedupe_by_product_code(items + high_price_items)
+    return items
 
 
 async def _search_with_query_variants(query: str) -> list[elevenst.ElevenstSearchItem]:

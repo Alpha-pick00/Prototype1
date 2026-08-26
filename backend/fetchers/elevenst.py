@@ -127,9 +127,18 @@ def parse_search_xml(xml_text: str) -> list[ElevenstSearchItem]:
     return items
 
 
-async def search_elevenst(query: str, limit: int = 5) -> list[ElevenstSearchItem]:
-    """11번가 ProductSearch API를 호출해 가격 오름차순(sortCd=A)으로 상품을
-    찾는다. 키가 없으면(.env 미설정) 즉시 빈 리스트 - 호출부가 "설정 안 됨"과
+async def search_elevenst(query: str, limit: int = 5, sort_cd: str = "A") -> list[ElevenstSearchItem]:
+    """11번가 ProductSearch API를 호출해 상품을 찾는다. sortCd 기본값 "A"는
+    "가격 오름차순"이 아니라 "추천도순"이다(2026-08-26 실측 정정 - 이전
+    docstring이 틀렸었다: 7개 정렬 코드를 전부 라이브로 찍어본 결과 A는
+    가격순이 아니었고, 진짜 낮은가격순(L)은 오히려 "10원"짜리 가격비교
+    중지/미끼가 상품만 나왔다). 인기·고가 상품(예: "아이폰 17")은 추천도순
+    표본 안에 실제 본품이 아예 안 잡히고 표기에 상품명을 끼워 넣은 저가
+    액세서리만 잡히는 경우가 있는데, 이때 "H"(높은가격순)로 다시 찾으면
+    본품이 나온다(실측: H로 아이폰 17 프로맥스 550만원대 매물 확인) -
+    price_table.all_candidates_look_like_accessories가 이 경우를 감지해
+    _search_candidates가 그때만 sort_cd="H"로 보정 검색을 추가로 태운다.
+    키가 없으면(.env 미설정) 즉시 빈 리스트 - 호출부가 "설정 안 됨"과
     "검색 결과 없음"을 굳이 구분할 필요가 없는 초기 단계라 조용히 넘어간다."""
     if not settings.elevenst_api_key:
         return []
@@ -143,7 +152,7 @@ async def search_elevenst(query: str, limit: int = 5) -> list[ElevenstSearchItem
                 "keyword": query,
                 "pageNum": 1,
                 "pageSize": limit,
-                "sortCd": "A",
+                "sortCd": sort_cd,
             },
         )
         response.raise_for_status()

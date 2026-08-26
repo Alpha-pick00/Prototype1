@@ -10,16 +10,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import autocomplete, history, preferences
+from . import adk_pipeline, autocomplete, history, preferences
 from .auth import google as google_auth
 from .auth import kakao as kakao_auth
 from .auth import naver as naver_auth
 from .auth.session import issue_session_token, verify_session_token
-from .debate import (
-    check_clarify_facets,
-    run_elevenst_only_debate,
-    run_elevenst_only_debate_stream,
-)
+from .debate import check_clarify_facets, run_elevenst_only_debate
 from .ocr import cleanup as ocr_cleanup
 from .ocr import google_vision as google_vision_ocr
 from .schemas import (
@@ -188,11 +184,12 @@ async def ocr_extract(image: UploadFile) -> OcrExtractResponse:
 @app.post("/decide", response_model=DecideResponse)
 async def decide(request: DecideRequest, background_tasks: BackgroundTasks) -> DecideResponse:
     try:
-        # 메인 검색 흐름은 11번가 오픈 API 전용 경로(run_elevenst_only_debate)를
-        # 쓴다 - 이 경로엔 애초에 되묻기(clarify)가 없다. base_query가
-        # 있으면(AI 상세검색 드릴다운 후속 턴) 재검색 대신 구조적 필터링으로
-        # 좁힌다(_search_candidates 참고).
-        result = await run_elevenst_only_debate(
+        # 메인 검색 흐름은 ADK 8단계 SequentialAgent 파이프라인(adk_pipeline.run -
+        # refine/search/propose/filter_merge/extract_pages/challenge/
+        # apply_challenge/judge)을 쓴다(2026-08-25 재구성) - 이 경로엔 애초에
+        # 되묻기(clarify)가 없다. base_query가 있으면(AI 상세검색 드릴다운
+        # 후속 턴) 재검색 대신 구조적 필터링으로 좁힌다.
+        result = await adk_pipeline.run(
             request.query, base_query=request.base_query, facet_answers=request.facet_answers
         )
     except (RuntimeError, ValueError) as exc:
@@ -219,9 +216,9 @@ async def decide_stream(request: DecideRequest) -> StreamingResponse:
     async def event_generator():
         result: DecideResponse | None = None
         try:
-            # 메인 검색 흐름은 decide()와 같은 이유로 run_elevenst_only_debate_stream을
+            # 메인 검색 흐름은 decide()와 같은 이유로 adk_pipeline.run_stream을
             # 쓴다(위 decide() 주석 참고 - clarify 개념이 없다).
-            async for event in run_elevenst_only_debate_stream(
+            async for event in adk_pipeline.run_stream(
                 request.query, base_query=request.base_query, facet_answers=request.facet_answers
             ):
                 if event["type"] == "final":
@@ -276,8 +273,11 @@ async def decide_clarify(
 
 @app.post("/decide/elevenst-only", response_model=DecideResponse)
 async def decide_elevenst_only(request: DecideRequest) -> DecideResponse:
-    """/decide와 실질적으로 같은 경로(run_elevenst_only_debate)를 별도
-    엔드포인트로도 노출해둔다(로컬 실험/검증 전용, 프론트엔드는 쓰지 않음)."""
+    """/decide가 2026-08-25부터 adk_pipeline(ADK 8단계 SequentialAgent)으로
+    바뀌면서, 이 엔드포인트는 그 이전의 평범한 함수 기반 경로
+    (debate.run_elevenst_only_debate)를 그대로 남겨 노출한다(로컬
+    실험/비교 전용, 프론트엔드는 쓰지 않음 - ADK 경로에 문제가 생기면 두
+    경로의 결과를 나란히 비교해볼 수 있다)."""
     try:
         return await run_elevenst_only_debate(
             request.query, base_query=request.base_query, facet_answers=request.facet_answers
