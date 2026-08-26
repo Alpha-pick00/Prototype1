@@ -300,27 +300,45 @@ def _parse_challenge_result(raw: Any) -> dict:
 
 
 def _apply_challenge_verdicts(
-    ranked: list[elevenst.ElevenstSearchItem], challenge_result: dict
+    ranked: list[elevenst.ElevenstSearchItem], challenge_result: dict, query: str = ""
 ) -> list[dict]:
     """7단계 apply_challenge의 핵심 로직(순수 함수) - challenge(DeepSeek)
-    검증 결과를 `_build_proposals`가 만든 Proposal 목록에 index 기준으로
-    덧씌운다(`verified`/`challenge_note`). challenge가 다루지 않은(상위
-    _MAX_CHALLENGE_CANDIDATES 밖) 후보는 verified=None(미검증)으로 남는다 -
-    "검증 안 됨"이지 "검증 실패"가 아니므로 judge 단계에서 배제하지 않는다.
-    ADK Event/state_delta는 dict만 담을 수 있어 Proposal.model_dump() 결과를
-    반환한다."""
+    검증 결과를 `_build_proposals`가 만든 Proposal 목록(기본값 verified=True)에
+    index 기준으로 덧씌운다(`verified`/`challenge_note`).
+
+    규칙 기반 안전망(2026-08-26, 사용자 리포트 - "1위에 휴대폰 뜨는데 2,3,4,5는
+    왜 저딴 액세서리가 떠") - challenge가 "아이폰 17 mesh패턴 핸드백 케이스"
+    처럼 상품명에 "케이스"가 그대로 박혀있는 명백한 액세서리조차
+    verified=True로 통과시킨 사례를 실측으로 확인했다(LLM이 프롬프트의
+    "판단이 애매하면 true로 두세요"를 과하게 적용한 것으로 보임 - 매 호출
+    같은 실수를 반복한다는 보장이 없어 재시도로 고쳐질 문제가 아니다).
+    challenge 판정과 무관하게, 상품명이 액세서리 지시어를 달고 있는데 질의
+    자체는 액세서리를 찾는 게 아니면(price_table._looks_like_accessory,
+    이미 검색 보정 트리거로 검증된 판정 로직 재사용) verified=False로 강제
+    덮어쓴다 - LLM이 놓쳐도 최소한 이 명백한 경우는 규칙으로 잡는다."""
     verdicts_by_index = {v["index"]: v for v in challenge_result.get("verdicts") or []}
+    query_wants_accessory = price_table_module._looks_like_accessory(query)
 
     proposals = _build_proposals(ranked, {})
     updated = []
     for i, proposal in enumerate(proposals):
         verdict = verdicts_by_index.get(i)
-        if verdict is None:
-            updated.append(proposal)
-            continue
-        updated.append(
-            proposal.model_copy(update={"verified": verdict["verified"], "challenge_note": verdict.get("note") or None})
-        )
+        if verdict is not None:
+            proposal = proposal.model_copy(
+                update={"verified": verdict["verified"], "challenge_note": verdict.get("note") or None}
+            )
+        if (
+            proposal.verified is not False
+            and not query_wants_accessory
+            and price_table_module._looks_like_accessory(proposal.product_name)
+        ):
+            proposal = proposal.model_copy(
+                update={
+                    "verified": False,
+                    "challenge_note": "액세서리로 보이는 상품명(케이스/충전기 등)이라 규칙 기반으로 걸러짐",
+                }
+            )
+        updated.append(proposal)
     return [p.model_dump() for p in updated]
 
 
@@ -331,7 +349,8 @@ class _ApplyChallengeNode(BaseAgent):
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         ranked = ctx.session.state.get("ranked_items") or []
         challenge_result = _parse_challenge_result(ctx.session.state.get("challenge_result"))
-        proposals = _apply_challenge_verdicts(ranked, challenge_result)
+        query = _resolved_query(ctx.session.state)
+        proposals = _apply_challenge_verdicts(ranked, challenge_result, query)
         yield Event(author=self.name, actions=EventActions(state_delta={"proposals": proposals}))
 
 
