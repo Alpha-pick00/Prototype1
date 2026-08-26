@@ -66,10 +66,6 @@ def _item(
     )
 
 
-async def _collect_stream(query: str, **kwargs) -> list[dict]:
-    return [event async for event in debate.run_elevenst_only_debate_stream(query, **kwargs)]
-
-
 def test_search_candidates_searches_directly_when_no_base_query(monkeypatch):
     seen = {}
 
@@ -500,92 +496,6 @@ def test_candidate_notes_returns_empty_dict_for_no_candidates():
     assert result == {}
 
 
-def test_stream_yields_final_before_candidate_notes_resolves(monkeypatch):
-    """체감 속도 개선(2026-08-24, "메인 추천이 끝나는 대로 먼저 보여주고 다른
-    후보 이유는 나중에 채워 넣기") 회귀 테스트 - candidate_notes를 일부러
-    안 끝나게 묶어둔 채로 final이 이미 도착해야 하고(일반 문구로), 그 뒤에
-    notes 이벤트로 실제 이유가 와야 한다."""
-
-    async def _fake_search(query, limit=10, sort_cd="A"):
-        return [_item("찾는 상품 A", 1000, "1"), _item("찾는 상품 B", 2000, "2")]
-
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
-    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
-
-    async def _fake_embed(texts):
-        return None
-
-    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
-
-    async def _fake_recommend(query, candidates):
-        return 0, "가장 저렴함"
-
-    notes_release = asyncio.Event()
-
-    async def _fake_notes(query, candidates):
-        await notes_release.wait()
-        return {0: "진짜 이유 A", 1: "진짜 이유 B"}
-
-    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
-    monkeypatch.setattr(debate.gpt, "candidate_notes", _fake_notes)
-
-    async def _run():
-        gen = debate.run_elevenst_only_debate_stream("찾는 상품")
-        status_event = await gen.__anext__()
-        final_event = await gen.__anext__()
-        # final이 이 시점에 이미 왔다는 것 자체가, candidate_notes를 기다리지
-        # 않았다는 증거다(release 신호를 아직 안 보냈는데도 final을 받았다).
-        assert not notes_release.is_set()
-        notes_release.set()
-        notes_event = await gen.__anext__()
-        return status_event, final_event, notes_event
-
-    status_event, final_event, notes_event = asyncio.run(_run())
-
-    assert status_event == {"type": "status", "stage": "searching"}
-
-    assert final_event["type"] == "final"
-    final_proposals = final_event["result"]["proposals"]
-    assert all(
-        p["reasoning"] == "11번가 오픈 API 검증 결과 (관련도순 - 함께 볼만한 상품)" for p in final_proposals
-    )
-
-    assert notes_event["type"] == "notes"
-    by_name = {p["product_name"]: p["reasoning"] for p in notes_event["proposals"]}
-    assert by_name["찾는 상품 A"] == "진짜 이유 A"
-    assert by_name["찾는 상품 B"] == "진짜 이유 B"
-
-
-def test_stream_skips_notes_event_when_candidate_notes_come_back_empty(monkeypatch):
-    """candidate_notes가 실패하거나(빈 dict) 아무 이유도 못 주면, 이미 final에
-    일반 문구로 채워둔 proposals를 굳이 다시 갈아끼울 필요가 없다 - notes
-    이벤트 자체를 생략해 프론트에 쓸모없는 패치를 안 보낸다."""
-
-    async def _fake_search(query, limit=10, sort_cd="A"):
-        return [_item("찾는 상품 A", 1000, "1")]
-
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
-    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
-
-    async def _fake_embed(texts):
-        return None
-
-    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
-
-    async def _fake_recommend(query, candidates):
-        return 0, "가장 저렴함"
-
-    async def _fake_notes(query, candidates):
-        return {}
-
-    monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
-    monkeypatch.setattr(debate.gpt, "candidate_notes", _fake_notes)
-
-    events = asyncio.run(_collect_stream("찾는 상품"))
-
-    assert [e["type"] for e in events] == ["status", "final"]
-
-
 def test_refine_query_returns_cleaned_query_on_success(monkeypatch):
     """2026-08-24 사용자 리포트 - "저렴한 아기 간식을 사고 싶어"처럼 대화체
     질의를 그대로 11번가 keyword로 넘기면 검색이 실패한다."""
@@ -870,31 +780,3 @@ def test_run_elevenst_only_debate_falls_back_to_closest_price_when_none_in_range
     assert "찾지 못해" in result.decision.reasoning
 
 
-def test_run_elevenst_only_debate_stream_falls_back_to_closest_price_when_none_in_range(monkeypatch):
-    async def _fake_search(query, limit=10, sort_cd="A"):
-        return [_item("망고주스 A", 39000, "1"), _item("망고주스 B", 45000, "2")]
-
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
-    monkeypatch.setattr(debate.price_table_module, "_product_name_matches", lambda a, b: True)
-
-    async def _fake_embed(texts):
-        return None
-
-    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
-
-    async def _fake_refine(query):
-        return "망고주스"
-
-    monkeypatch.setattr(debate.gpt, "refine_query", _fake_refine)
-
-    async def _boom_recommend(query, candidates):
-        raise AssertionError("가격 조건 미충족 시 recommend_best가 호출되면 안 된다")
-
-    monkeypatch.setattr(debate.gpt, "recommend_best", _boom_recommend)
-    monkeypatch.setattr(debate.gpt, "candidate_notes", _no_notes)
-
-    events = asyncio.run(_collect_stream("망고주스 2만원대로 사고 싶어"))
-
-    final = next(e for e in events if e["type"] == "final")
-    assert final["result"]["decision"]["product_name"] == "망고주스 A"
-    assert "찾지 못해" in final["result"]["decision"]["reasoning"]

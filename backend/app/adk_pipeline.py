@@ -708,9 +708,9 @@ def _all_proposals_unverified(proposals: list[dict]) -> bool:
 async def run_stream(
     query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
 ) -> AsyncIterator[dict[str, Any]]:
-    """`debate.run_elevenst_only_debate_stream`과 정확히 같은 이벤트 계약
-    (status/final/error)을 유지한다 - main.py가 어느 구현을 부르는지와
-    무관하게 프론트는 그대로 동작한다.
+    """옛 `run_elevenst_only_debate_stream`(제거됨, 2026-08-26)이 쓰던 것과
+    같은 이벤트 계약(status/final/error)을 유지한다 - 프론트는 그대로
+    동작한다.
 
     challenge가 상위 후보를 전부 verified=False로 판정하면(2026-08-26)
     sortCd="H" 보정 검색을 강제로 켠 채 파이프라인을 한 번만 더 돌린다 -

@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import re
-from typing import Any, AsyncIterator
 
 from fetchers import elevenst
 
@@ -222,9 +221,8 @@ async def _search_and_rank_candidates(
     query: str, base_query: str | None, facet_answers: dict[str, list[str]] | None
 ) -> tuple[str, list[elevenst.ElevenstSearchItem], str | None]:
     """검색 -> 관련성 필터 -> (0건이면 임베딩 의미 유사도 구제 -> 그래도 0건이면
-    대안 표기 재검색) -> 가격 조건 필터 -> 관련도순 정렬까지,
-    run_elevenst_only_debate()와 그 스트리밍 버전이 공유하는 앞부분이다.
-    질의에 가격 조건이 있으면(예: "2만원대") extract_price_range로 먼저
+    대안 표기 재검색) -> 가격 조건 필터 -> 관련도순 정렬까지, run_elevenst_only_debate()
+    가 쓰는 앞부분이다. 질의에 가격 조건이 있으면(예: "2만원대") extract_price_range로 먼저
     떼어낸다 - 11번가 keyword 검색은 순수 텍스트 매칭이라 "2만원대" 같은
     표현이 검색어에 남아있으면 검색 자체가 실패한다. 질의가 대화체면
     (_maybe_refine_query) 그 다음 정제한다 - 반환하는 질의는 호출부가 이후
@@ -380,8 +378,7 @@ async def run_elevenst_only_debate(
     proposals 각각의 이유(reasoning)는 gpt.candidate_notes()가 별도로 채운다
     (2026-08-24 사용자 요청 - "후보 추천해주는 애들도 추천하는 이유가 있으면
     좋겠다"). recommend_best와 asyncio.gather로 동시에 실행해 순차 호출
-    대비 지연을 줄인다 - 이 비스트리밍 경로는 결과를 한 번에만 반환하므로
-    (스트리밍 버전과 달리 중간에 먼저 보여줄 수 없다) 어차피 둘 다 끝나야
+    대비 지연을 줄인다 - 결과를 한 번에만 반환하므로 어차피 둘 다 끝나야
     반환할 수 있어 그냥 gather로 묶는다.
 
     facet_answers가 있으면(다중 선택) _product_name_matches 재검사를 건너뛴다
@@ -414,48 +411,6 @@ async def run_elevenst_only_debate(
         decision = _build_decision(ranked, recommended, model_label="HCX")
     proposals = _build_proposals(ranked, notes)
     return DecideResponse(query=query, proposals=proposals, decision=decision)
-
-
-async def run_elevenst_only_debate_stream(
-    query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
-) -> AsyncIterator[dict[str, Any]]:
-    """run_elevenst_only_debate()의 스트리밍 버전 - 메인 검색 흐름
-    (/decide/stream)이 이 경로를 쓴다.
-
-    체감 속도 개선(2026-08-24, "메인 추천이 끝나는 대로 먼저 보여주고 다른
-    후보 이유는 준비되는 대로 나중에 채워 넣기") - candidate_notes(다른
-    후보 이유, 보통 더 느린 쪽)를 백그라운드 작업으로 미리 던져두고
-    recommend_best(메인 선택)만 기다린 뒤 final을 즉시 내보낸다. 이때
-    proposals는 아직 일반 문구로 채워진다(하단 카드 자체는 바로 보여주되
-    이유만 잠시 후 갱신). candidate_notes가 끝나면 실제 이유로 다시 채운
-    proposals를 notes 이벤트로 한 번 더 내보낸다 - 프론트가 이미 그려둔
-    카드의 이유 텍스트만 갈아끼운다. 실제 총 소요 시간은 그대로지만,
-    사용자가 아무것도 못 보고 기다리는 시간은 recommend_best 하나만큼으로
-    줄어든다."""
-    yield {"type": "status", "stage": "searching"}
-    try:
-        query, ranked, price_miss_note = await _search_and_rank_candidates(query, base_query, facet_answers)
-    except RuntimeError as exc:
-        yield {"type": "error", "message": str(exc)}
-        return
-
-    # 가격 조건에 맞는 후보가 없으면(price_miss_note) 추천 Agent를 부르지
-    # 않고 규칙 기반으로 바로 확정한다 - run_elevenst_only_debate와 같은 이유.
-    if price_miss_note:
-        decision = _build_price_miss_decision(ranked, price_miss_note)
-    else:
-        notes_task = asyncio.create_task(gpt.candidate_notes(query, ranked))
-        recommended = await gpt.recommend_best(query, ranked)
-        decision = _build_decision(ranked, recommended, model_label="HCX")
-
-    proposals = _build_proposals(ranked, {})
-    result = DecideResponse(query=query, proposals=proposals, decision=decision)
-    yield {"type": "final", "result": result.model_dump()}
-
-    notes = await (notes_task if not price_miss_note else gpt.candidate_notes(query, ranked))
-    if notes:
-        updated_proposals = _build_proposals(ranked, notes)
-        yield {"type": "notes", "proposals": [p.model_dump() for p in updated_proposals]}
 
 
 # check_clarify_facets()의 base_query 재사용 필터링 전용(사용자 요청, 2026-08-13:
@@ -979,10 +934,10 @@ async def check_clarify_facets(
     """AI 상세검색(2026-08-12 요청) - "음료수"처럼 짧고 애매한 검색어를 11번가
     실제 검색 결과 상품명에 근거해 몇 가지 기준(facet)으로 좁혀나가도록 DeepSeek에게
     물어본다(원래 Qwen으로 붙였다가, Model Studio 계정의 과금 플랜 활성화 문제로
-    이미 키가 있고 바로 되는 DeepSeek로 옮겼다). run_elevenst_only_debate()/
-    run_elevenst_only_debate_stream()과는 완전히 분리된 별도 진입점이다 - 그 둘은
-    "LLM 호출 0번"이 테스트로 고정된 불변식이라(test_run_elevenst_only_debate_never_calls_any_llm)
-    여기서 DeepSeek를 부르는 로직을 거기 안에 섞으면 안 된다. 프론트가 이 함수를
+    이미 키가 있고 바로 되는 DeepSeek로 옮겼다). run_elevenst_only_debate()와는
+    완전히 분리된 별도 진입점이다 - "LLM 호출 0번"이 테스트로 고정된
+    불변식이라(test_run_elevenst_only_debate_never_calls_any_llm) 여기서
+    DeepSeek를 부르는 로직을 거기 안에 섞으면 안 된다. 프론트가 이 함수를
     먼저(짧은 쿼리에 한해) 호출해보고, facets가 비어 있으면(=명확한 검색어이거나
     DeepSeek 호출 실패) 그대로 elevenst-only 빠른 경로로 진행한다.
 

@@ -67,19 +67,6 @@ async def _search_elevenst_items(query: str, limit: int) -> list[elevenst.Eleven
     return items
 
 
-async def _search_elevenst_categories(query: str) -> list[elevenst.ElevenstCategoryGroup]:
-    """app.debate.check_clarify_facets의 "카테고리" facet 실측 출처 - 같은
-    예외 안전성 계약(막히거나 실패해도 빈 리스트)."""
-    try:
-        return await elevenst.search_categories(query)
-    except elevenst.ElevenstSearchBlocked:
-        logger.warning("elevenst category breakdown search blocked for query=%r", query)
-        return []
-    except Exception:
-        logger.exception("elevenst category breakdown search crashed for query=%r", query)
-        return []
-
-
 # 2026-08-24 실측("아이간식" 검색 시 "자동 제면기 파스타 기계 식사준비
 # 건강식 아이간식 식당 업소용..."이 관련 상품으로 통과) - token_set_ratio는
 # 질의 토큰이 후보 상품명에 전부 부분집합으로 들어있기만 하면 나머지가

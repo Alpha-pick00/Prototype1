@@ -11,13 +11,6 @@ AgentName = Literal["gpt", "groq", "deepseek", "danawa", "elevenst"]
 AuthProvider = Literal["google", "kakao", "naver"]
 
 
-class SearchResult(BaseModel):
-    title: str
-    url: str
-    snippet: str
-    score: float | None = None
-
-
 class Proposal(BaseModel):
     agent: AgentName
     product_name: str | None = None
@@ -56,23 +49,6 @@ class RefinedQuery(BaseModel):
     error: str | None = None
 
 
-class ChallengeVerdict(BaseModel):
-    url: str | None = None
-    verified: bool
-    note: str = ""
-    # 2026-08-19("실시간으로 판매처 페이지를... 가져오지 않는 이상") - challenge
-    # 직전 _ExtractPagesNode가 이미 후보 페이지를 라이브로 재조회해두는데, 그동안
-    # 이 재조회 원문이 그라운딩 검증(verified/note)에만 쓰이고 가격 자체는
-    # 갱신되지 않았다 - 이미 지불한 네트워크 비용을 가격 신선도에도 활용한다.
-    # 재조회 원문에서 명확히 확인 안 되면(추측 금지) None으로 둔다.
-    refreshed_price_krw: int | None = None
-
-
-class ChallengeResult(BaseModel):
-    verdicts: list[ChallengeVerdict] = []
-    error: str | None = None
-
-
 class Decision(BaseModel):
     product_name: str
     price: str
@@ -94,18 +70,6 @@ class Decision(BaseModel):
     # 애초에 challenge가 필요 없는 경우도 apply_challenge에서 True로 강제되므로
     # 여기 None에는 안 걸림).
     verified: bool | None = None
-
-
-class JudgeVerdict(BaseModel):
-    """judge LlmAgent의 output_schema — chosen_agent 없이 선택한 상품만 반환하고,
-    실제 chosen_agent는 adk_pipeline이 url로 역매칭해서 채운다(제안자가 여럿일
-    수 있어 LLM에게 단일 리터럴을 직접 고르게 하지 않는다)."""
-
-    product_name: str
-    price: str
-    retailer: str
-    url: str
-    reasoning: str
 
 
 class DecideRequest(BaseModel):
@@ -192,6 +156,12 @@ class DecideResponse(BaseModel):
     style_guide: StyleGuide | None = None
 
 
+# 브랜드 단축 검색/대량구매 응답 모드("bulk"/"brand_price")는 더 이상 새로
+# 만들어지지 않지만(check_clarify_facets가 brands를 채우지 않음 - 일반 facet
+# 시스템으로 대체됨), app.history가 과거 저장된 SQLite 기록을 그대로
+# DecideResultUnion으로 역직렬화하므로(HistoryEntry.result) 이 모델들을
+# 지우면 그 기록 로드가 검증 에러로 깨진다 - frontend/src/app/components/
+# SearchResults.tsx의 같은 이유의 하위호환 표시 경로와 짝을 이룬다.
 class BrandOption(BaseModel):
     brand: str
     product_name: str

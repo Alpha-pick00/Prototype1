@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.debate import (
@@ -14,7 +15,7 @@ from app.debate import (
     _MAX_BRAND_ENRICH_FANOUT,
     _strip_query_answered_options,
     check_clarify_facets,
-    run_elevenst_only_debate_stream,
+    run_elevenst_only_debate,
 )
 from app.intent import extract_price_range, is_non_product_chitchat, looks_conversational_query, needs_clarification
 from app.main import app
@@ -1030,11 +1031,6 @@ def test_check_clarify_facets_never_asks_category(monkeypatch):
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
 
-    async def _boom_categories(query):
-        raise AssertionError("카테고리 축을 안 쓰기로 했는데 search_categories가 호출됐다")
-
-    monkeypatch.setattr("fetchers.elevenst.search_categories", _boom_categories)
-
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="카테고리", options=["엉뚱한값"]), ClarifyFacet(label="모델", options=names)]
 
@@ -1525,17 +1521,17 @@ def test_decide_clarify_endpoint_empty_for_specific_query():
     assert data["options"]["facets"] == []
 
 
-# -- 회귀: run_elevenst_only_debate_stream은 짧은 검색어에도 LLM을 절대 안 부른다 ----
+# -- 회귀: run_elevenst_only_debate는 짧은 검색어에도 LLM을 절대 안 부른다 ----
 
 
-def test_run_elevenst_only_debate_stream_never_calls_deepseek_facets_even_for_short_query(monkeypatch):
-    """check_clarify_facets()는 완전히 별도 진입점이고, run_elevenst_only_debate_stream()
+def test_run_elevenst_only_debate_never_calls_deepseek_facets_even_for_short_query(monkeypatch):
+    """check_clarify_facets()는 완전히 별도 진입점이고, run_elevenst_only_debate()
     자체는 needs_clarification()을 아예 모른다 - "음료수" 같은 짧은 검색어를 이
     경로로 직접 태워도 extract_facets_from_names가 호출되면 안 된다(LLM 호출 0번
     불변식 유지 확인)."""
 
     async def _boom(query, names):
-        raise AssertionError("run_elevenst_only_debate_stream이 facet 추출을 호출했다 - LLM 0회 불변식 위반")
+        raise AssertionError("run_elevenst_only_debate가 facet 추출을 호출했다 - LLM 0회 불변식 위반")
 
     monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _boom)
 
@@ -1544,12 +1540,5 @@ def test_run_elevenst_only_debate_stream_never_calls_deepseek_facets_even_for_sh
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _search_elevenst)
 
-    async def _collect():
-        return [event async for event in run_elevenst_only_debate_stream("음료수")]
-
-    events = asyncio.run(_collect())
-
-    assert events == [
-        {"type": "status", "stage": "searching"},
-        {"type": "error", "message": "11번가에서 '음료수'에 대해 관련성 있는 상품을 찾지 못했습니다."},
-    ]
+    with pytest.raises(RuntimeError, match="11번가에서 '음료수'에 대해 관련성 있는 상품을 찾지 못했습니다."):
+        asyncio.run(run_elevenst_only_debate("음료수"))
