@@ -106,6 +106,64 @@ def test_apply_challenge_verdicts_leaves_uncovered_candidates_untouched():
     assert proposals[0]["challenge_note"] is None
 
 
+def test_apply_challenge_verdicts_rule_based_override_catches_accessory_challenge_missed(monkeypatch):
+    """2026-08-26, 사용자 리포트 - "1위에 휴대폰 뜨는데 2,3,4,5는 왜 저딴
+    액세서리가 떠". challenge(DeepSeek)가 "핸드백 케이스"처럼 상품명에
+    "케이스"가 그대로 있는 명백한 액세서리조차 verified=True로 통과시킨
+    사례를 실측으로 확인 - 규칙 기반 안전망이 challenge 판정과 무관하게
+    덮어써야 한다."""
+    ranked = [_item("아이폰 17 mesh패턴 핸드백 케이스", 26600, code="1")]
+    challenge_result = {"verdicts": [{"index": 0, "verified": True, "note": ""}]}
+
+    proposals = adk_pipeline._apply_challenge_verdicts(ranked, challenge_result, query="아이폰 17")
+
+    assert proposals[0]["verified"] is False
+    assert "액세서리" in proposals[0]["challenge_note"]
+
+
+def test_apply_challenge_verdicts_rule_based_override_skipped_when_query_wants_accessory():
+    """"아이폰 케이스"를 검색했으면 케이스가 나오는 게 정상이므로 규칙 기반
+    안전망이 개입하면 안 된다."""
+    ranked = [_item("아이폰 17 실리콘 케이스", 9900, code="1")]
+    proposals = adk_pipeline._apply_challenge_verdicts(ranked, {"verdicts": []}, query="아이폰 케이스")
+    assert proposals[0]["verified"] is True
+
+
+def test_apply_challenge_verdicts_does_not_override_when_challenge_already_flagged_false():
+    """challenge가 이미 False로 판정한 건 규칙 기반 note로 덮어쓰지 않고
+    challenge의 이유를 그대로 보존한다."""
+    ranked = [_item("아이폰 17 케이스", 9900, code="1")]
+    challenge_result = {"verdicts": [{"index": 0, "verified": False, "note": "본품이 아닌 액세서리"}]}
+
+    proposals = adk_pipeline._apply_challenge_verdicts(ranked, challenge_result, query="아이폰 17")
+
+    assert proposals[0]["verified"] is False
+    assert proposals[0]["challenge_note"] == "본품이 아닌 액세서리"
+
+
+def test_candidates_with_verdicts_overlays_verified_from_proposals():
+    """2026-08-26, 사용자 리포트 - "골프공 검색했는데 골프파우치가 최종
+    추천으로 뜸". judge 프롬프트용 후보에 challenge 검증 결과(verified/
+    challenge_note)가 실려야 judge가 그 판정을 보고 피할 수 있다."""
+    state = {
+        "ranked_items": [_item("골프공 12개입", 15000, code="1"), _item("골프파우치", 9900, code="2")],
+        "proposals": [
+            {"verified": True, "challenge_note": None},
+            {"verified": False, "challenge_note": "본품이 아닌 파우치"},
+        ],
+    }
+    candidates = adk_pipeline._candidates_with_verdicts(state)
+    assert candidates[0]["verified"] is True
+    assert candidates[1]["verified"] is False
+    assert candidates[1]["challenge_note"] == "본품이 아닌 파우치"
+
+
+def test_candidates_with_verdicts_omits_verified_when_no_proposals_yet():
+    state = {"ranked_items": [_item("A", 1000, code="1")], "proposals": []}
+    candidates = adk_pipeline._candidates_with_verdicts(state)
+    assert "verified" not in candidates[0]
+
+
 def test_resolved_query_prefers_refine_result_over_original():
     state = {"original_query": "원본", "refine_result": {"query": "정제됨"}}
     assert adk_pipeline._resolved_query(state) == "정제됨"
@@ -114,6 +172,28 @@ def test_resolved_query_prefers_refine_result_over_original():
 def test_resolved_query_falls_back_to_original_when_refine_missing():
     state = {"original_query": "원본"}
     assert adk_pipeline._resolved_query(state) == "원본"
+
+
+def test_resolved_query_parses_raw_text_refine_result():
+    """2026-08-26, refine을 Qwen -> HCX로 교체 - HCX는 response_format을
+    전혀 지원하지 않아 output_schema를 뺐다. output_schema 없이는 ADK가
+    refine_result를 dict로 파싱해주지 않고 원문 텍스트 그대로 state에
+    남긴다 - _resolved_query가 직접 파싱해야 한다."""
+    state = {"original_query": "원본", "refine_result": '{"query": "정제됨", "error": null}'}
+    assert adk_pipeline._resolved_query(state) == "정제됨"
+
+
+def test_resolved_query_falls_back_to_original_when_refine_result_text_malformed():
+    state = {"original_query": "원본", "refine_result": "이건 JSON이 아님"}
+    assert adk_pipeline._resolved_query(state) == "원본"
+
+
+def test_resolved_query_parses_bare_json_string_literal_refine_result():
+    """실측(2026-08-26, HCX 전환 후) - 프롬프트가 `{"query": "..."}`를
+    지시해도 HCX가 그냥 `"저렴한 아기 간식"`(JSON 객체가 아니라 순수 문자열
+    리터럴)만 돌려준 사례가 있었다 - 이 경우도 정제 결과로 인정해야 한다."""
+    state = {"original_query": "저렴한 아기 간식을 사고 싶어", "refine_result": '"저렴한 아기 간식"'}
+    assert adk_pipeline._resolved_query(state) == "저렴한 아기 간식"
 
 
 def test_judge_recommended_returns_none_for_sentinel_index():

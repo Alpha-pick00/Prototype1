@@ -6,7 +6,44 @@ from __future__ import annotations
 import asyncio
 
 from app import debate
+from app.agents.base import build_recommend_prompt
 from fetchers.elevenst import ElevenstSearchItem
+
+
+# ---------------------------------------------------------------------------
+# build_recommend_prompt - verified=False 후보에 [검증 실패] 표시(2026-08-26,
+# 사용자 리포트 - "골프공 검색했는데 골프파우치가 최종 추천으로 뜸". judge가
+# challenge 검증 결과를 아예 못 보고 골랐던 문제).
+# ---------------------------------------------------------------------------
+
+
+def test_build_recommend_prompt_flags_verified_false_candidate():
+    candidates = [
+        {"product_name": "골프공 12개입", "price_krw": 15000, "seller": "판매자"},
+        {
+            "product_name": "골프파우치",
+            "price_krw": 9900,
+            "seller": "판매자",
+            "verified": False,
+            "challenge_note": "본품이 아닌 파우치",
+        },
+    ]
+    prompt = build_recommend_prompt("골프공", candidates)
+    candidates_block = prompt.rsplit("후보:\n", 1)[1]
+    assert candidates_block.startswith("[0] 골프공 12개입")
+    lines = candidates_block.splitlines()
+    assert "[검증 실패" not in lines[0]
+    assert "[검증 실패: 본품이 아닌 파우치]" in lines[1]
+
+
+def test_build_recommend_prompt_omits_flag_when_verified_key_missing():
+    """옛 비-ADK 경로(run_elevenst_only_debate)는 challenge 자체가 없어 후보
+    dict에 verified 키가 아예 없다 - 이 경우 프롬프트가 기존과 동일해야
+    한다(회귀 없음)."""
+    candidates = [{"product_name": "A", "price_krw": 1000, "seller": "판매자"}]
+    prompt = build_recommend_prompt("질의", candidates)
+    candidates_block = prompt.rsplit("후보:\n", 1)[1]
+    assert "[검증 실패" not in candidates_block
 
 
 def _item(
@@ -36,7 +73,7 @@ async def _collect_stream(query: str, **kwargs) -> list[dict]:
 def test_search_candidates_searches_directly_when_no_base_query(monkeypatch):
     seen = {}
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         seen["query"] = query
         seen["limit"] = limit
         return [_item("아무 상품", 1000, "1")]
@@ -55,7 +92,7 @@ def test_search_candidates_reuses_base_query_search_and_filters_structurally_whe
     로컬 필터링(_filter_items_by_extra_terms)으로 구조적으로 좁혀야 한다."""
     seen = {}
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         seen["query"] = query
         seen["limit"] = limit
         return [
@@ -109,7 +146,7 @@ def test_run_elevenst_only_debate_uses_recommend_agent_pick_over_cheapest(monkey
     """추천 Agent가 최저가가 아닌 후보를 골라도(리뷰/구매만족도 등을 근거로)
     그 선택을 최종 추천으로 써야 한다 - 무조건 최저가를 강제하지 않는다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("찾는 상품 A", 1000, "1"), _item("찾는 상품 B", 2000, "2")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -140,7 +177,7 @@ def test_run_elevenst_only_debate_drops_reasoning_that_leaks_internal_index(monk
     사용자는 본 적 없는 번호라 무슨 뜻인지 모른다 - 그런 reasoning은 버리고
     일반 문구로 대체해야 한다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("찾는 상품 A", 1000, "1"), _item("찾는 상품 B", 2000, "2")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -170,7 +207,7 @@ def test_run_elevenst_only_debate_uses_candidate_notes_for_proposal_reasoning(mo
     recommend_best와 candidate_notes는 asyncio.gather로 동시에 호출되므로
     서로 독립적인 별도 함수로 monkeypatch한다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("찾는 상품 A", 1000, "1"), _item("찾는 상품 B", 2000, "2")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -198,7 +235,7 @@ def test_run_elevenst_only_debate_uses_candidate_notes_for_proposal_reasoning(mo
 
 
 def test_run_elevenst_only_debate_falls_back_to_generic_note_when_note_leaks_index(monkeypatch):
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("찾는 상품 A", 1000, "1"), _item("찾는 상품 B", 2000, "2")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -228,7 +265,7 @@ def test_run_elevenst_only_debate_propagates_image_url_to_decision_and_proposals
     """카드 UI가 쓸 image_url이 ElevenstSearchItem -> Decision/Proposal까지
     끊기지 않고 전달되는지 확인한다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [
             _item("찾는 상품 A", 1000, "1", image_url="https://cdn.011st.com/a.webp"),
             _item("찾는 상품 B", 2000, "2", image_url="https://cdn.011st.com/b.webp"),
@@ -260,7 +297,7 @@ def test_run_elevenst_only_debate_propagates_review_count_and_buy_satisfy_to_pro
     """프론트가 "만족도 최고" 배지를 계산하려면(2026-08-24, 사용자 요청)
     review_count/buy_satisfy가 Proposal까지 전달돼야 한다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [
             _item("찾는 상품 A", 1000, "1", review_count=5, buy_satisfy=90),
             _item("찾는 상품 B", 2000, "2", review_count=None, buy_satisfy=None),
@@ -288,7 +325,7 @@ def test_run_elevenst_only_debate_propagates_review_count_and_buy_satisfy_to_pro
 
 
 def test_run_elevenst_only_debate_falls_back_to_cheapest_when_recommend_agent_fails(monkeypatch):
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("찾는 상품 A", 2000, "1"), _item("찾는 상품 B", 1000, "2")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -469,7 +506,7 @@ def test_stream_yields_final_before_candidate_notes_resolves(monkeypatch):
     안 끝나게 묶어둔 채로 final이 이미 도착해야 하고(일반 문구로), 그 뒤에
     notes 이벤트로 실제 이유가 와야 한다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("찾는 상품 A", 1000, "1"), _item("찾는 상품 B", 2000, "2")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -524,7 +561,7 @@ def test_stream_skips_notes_event_when_candidate_notes_come_back_empty(monkeypat
     일반 문구로 채워둔 proposals를 굳이 다시 갈아끼울 필요가 없다 - notes
     이벤트 자체를 생략해 프론트에 쓸모없는 패치를 안 보낸다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("찾는 상품 A", 1000, "1")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -604,7 +641,7 @@ def test_run_elevenst_only_debate_refines_conversational_query_before_search(mon
     메시지와 일관성 유지)."""
     seen_search_query = {}
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         seen_search_query["query"] = query
         return [_item("아기 간식 세트", 5000, "1")]
 
@@ -640,7 +677,7 @@ def test_run_elevenst_only_debate_skips_refine_for_clean_query(monkeypatch):
     """이미 짧고 깨끗한 검색어는 정제(LLM 호출) 자체를 건너뛰어야 한다 -
     불필요한 지연/비용을 늘리지 않는다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("찾는 상품 A", 1000, "1")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -667,7 +704,7 @@ def test_run_elevenst_only_debate_skips_refine_for_clean_query(monkeypatch):
 
 
 def test_run_elevenst_only_debate_falls_back_to_original_query_when_refine_fails(monkeypatch):
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("찾는 상품 A", 1000, "1")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -700,7 +737,7 @@ def test_run_elevenst_only_debate_uses_semantic_fallback_when_rapidfuzz_rejects_
     semantic_relevance_fallback이 임베딩 유사도로 구제하면 검색이 성공해야
     한다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("카프리썬 오렌지망고 200ml x 40입 주스", 15000, "1")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -728,7 +765,7 @@ def test_run_elevenst_only_debate_skips_semantic_fallback_for_facet_drilldown(mo
     걸러진 결과라 semantic_relevance_fallback을 또 태우면 안 된다(불필요한
     임베딩 호출) - 0건이면 그냥 대안 표기 재검색으로 넘어가야 한다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return []
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
@@ -759,7 +796,7 @@ def test_run_elevenst_only_debate_filters_by_price_condition_before_recommending
     범위 안의 후보만 추천 Agent에게 넘겨야 한다(범위 밖 후보가 섞여서
     엉뚱하게 뽑히면 안 됨)."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         assert query == "망고주스"
         return [
             _item("망고주스 A", 15000, "1"),
@@ -800,7 +837,7 @@ def test_run_elevenst_only_debate_falls_back_to_closest_price_when_none_in_range
     """가격 조건에 맞는 후보가 하나도 없으면 추천 Agent를 부르지 않고,
     가격이 가장 근접한 상품을 규칙 기반으로 안내해야 한다."""
 
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [
             _item("망고주스 A", 39000, "1"),
             _item("망고주스 B", 45000, "2"),
@@ -834,7 +871,7 @@ def test_run_elevenst_only_debate_falls_back_to_closest_price_when_none_in_range
 
 
 def test_run_elevenst_only_debate_stream_falls_back_to_closest_price_when_none_in_range(monkeypatch):
-    async def _fake_search(query, limit=10):
+    async def _fake_search(query, limit=10, sort_cd="A"):
         return [_item("망고주스 A", 39000, "1"), _item("망고주스 B", 45000, "2")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)

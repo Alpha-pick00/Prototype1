@@ -156,15 +156,57 @@ def _build_challenge_prompt(query: str, candidates: list[dict]) -> str:
     return f"{_CHALLENGE_INSTRUCTIONS}\n\n사용자 질의: {query}\n\n후보:\n{block}"
 
 
+def _parse_refine_result(text: str) -> dict:
+    """refine(HCX) 응답을 {"query": "..."} dict로 파싱한다. output_schema
+    없이(HCX가 json_schema/json_object 둘 다 거부해 2026-08-26에 뺐다)
+    도는 이후로는 응답 형식이 프롬프트 지시를 안정적으로 안 지킨다(실측 -
+    `{"query": "저렴한 아기 간식"}`을 지시했는데 그냥 `"저렴한 아기 간식"`
+    (JSON 객체가 아니라 순수 문자열 리터럴)만 돌아온 사례 확인). 정상
+    형식(`{...}`)을 먼저 시도하고, 실패하면 문자열 리터럴(`"..."`)로도
+    시도한다 - 둘 다 안 되면 빈 dict(호출부가 원본 질의로 폴백)."""
+    try:
+        return parse_json_object(text)
+    except (ValueError, TypeError):
+        pass
+    try:
+        value = json.loads(text.strip())
+    except (ValueError, TypeError):
+        return {}
+    return {"query": value} if isinstance(value, str) else {}
+
+
 def _resolved_query(state: dict) -> str:
     """refine 단계 결과(refine_result.query)가 있으면 그걸, 없으면(스킵/실패)
-    원본 질의를 쓴다."""
-    refine_result = state.get("refine_result") or {}
+    원본 질의를 쓴다. refine이 output_schema 없이 도는 이후로 `refine_result`
+    는 ADK가 파싱해주지 않은 원문 텍스트일 수 있다 - `_parse_refine_result`로
+    여기서 직접 파싱한다(challenge의 `_parse_challenge_result`와 동일한
+    이유/패턴)."""
+    refine_result = state.get("refine_result")
+    if isinstance(refine_result, str):
+        refine_result = _parse_refine_result(refine_result)
+    refine_result = refine_result or {}
     return refine_result.get("query") or state.get("original_query") or ""
 
 
 def _ranked_items(state: dict) -> list[elevenst.ElevenstSearchItem]:
     return state.get("ranked_items") or []
+
+
+def _candidates_with_verdicts(state: dict) -> list[dict]:
+    """judge 프롬프트용 후보 목록 - `_ranked_items`(가격/판매자 등 원본
+    필드)에 apply_challenge가 만든 `proposals`의 verified/challenge_note를
+    index 기준으로 덧씌운다(2026-08-26, 사용자 리포트 - "골프공 검색했는데
+    골프파우치가 최종 추천으로 뜸"). judge는 이전까지 challenge 검증 결과를
+    아예 못 보고 골랐다 - 두 검증 단계가 서로 대화를 안 하고 있었다."""
+    proposals = state.get("proposals") or []
+    merged = []
+    for i, item in enumerate(_ranked_items(state)):
+        candidate = dict(item)
+        if i < len(proposals):
+            candidate["verified"] = proposals[i].get("verified")
+            candidate["challenge_note"] = proposals[i].get("challenge_note")
+        merged.append(candidate)
+    return merged
 
 
 def _model_error_fallback_response(text: str) -> LlmResponse:
@@ -307,27 +349,45 @@ def _parse_challenge_result(raw: Any) -> dict:
 
 
 def _apply_challenge_verdicts(
-    ranked: list[elevenst.ElevenstSearchItem], challenge_result: dict
+    ranked: list[elevenst.ElevenstSearchItem], challenge_result: dict, query: str = ""
 ) -> list[dict]:
     """7단계 apply_challenge의 핵심 로직(순수 함수) - challenge(DeepSeek)
-    검증 결과를 `_build_proposals`가 만든 Proposal 목록에 index 기준으로
-    덧씌운다(`verified`/`challenge_note`). challenge가 다루지 않은(상위
-    _MAX_CHALLENGE_CANDIDATES 밖) 후보는 verified=None(미검증)으로 남는다 -
-    "검증 안 됨"이지 "검증 실패"가 아니므로 judge 단계에서 배제하지 않는다.
-    ADK Event/state_delta는 dict만 담을 수 있어 Proposal.model_dump() 결과를
-    반환한다."""
+    검증 결과를 `_build_proposals`가 만든 Proposal 목록(기본값 verified=True)에
+    index 기준으로 덧씌운다(`verified`/`challenge_note`).
+
+    규칙 기반 안전망(2026-08-26, 사용자 리포트 - "1위에 휴대폰 뜨는데 2,3,4,5는
+    왜 저딴 액세서리가 떠") - challenge가 "아이폰 17 mesh패턴 핸드백 케이스"
+    처럼 상품명에 "케이스"가 그대로 박혀있는 명백한 액세서리조차
+    verified=True로 통과시킨 사례를 실측으로 확인했다(LLM이 프롬프트의
+    "판단이 애매하면 true로 두세요"를 과하게 적용한 것으로 보임 - 매 호출
+    같은 실수를 반복한다는 보장이 없어 재시도로 고쳐질 문제가 아니다).
+    challenge 판정과 무관하게, 상품명이 액세서리 지시어를 달고 있는데 질의
+    자체는 액세서리를 찾는 게 아니면(price_table._looks_like_accessory,
+    이미 검색 보정 트리거로 검증된 판정 로직 재사용) verified=False로 강제
+    덮어쓴다 - LLM이 놓쳐도 최소한 이 명백한 경우는 규칙으로 잡는다."""
     verdicts_by_index = {v["index"]: v for v in challenge_result.get("verdicts") or []}
+    query_wants_accessory = price_table_module._looks_like_accessory(query)
 
     proposals = _build_proposals(ranked, {})
     updated = []
     for i, proposal in enumerate(proposals):
         verdict = verdicts_by_index.get(i)
-        if verdict is None:
-            updated.append(proposal)
-            continue
-        updated.append(
-            proposal.model_copy(update={"verified": verdict["verified"], "challenge_note": verdict.get("note") or None})
-        )
+        if verdict is not None:
+            proposal = proposal.model_copy(
+                update={"verified": verdict["verified"], "challenge_note": verdict.get("note") or None}
+            )
+        if (
+            proposal.verified is not False
+            and not query_wants_accessory
+            and price_table_module._looks_like_accessory(proposal.product_name)
+        ):
+            proposal = proposal.model_copy(
+                update={
+                    "verified": False,
+                    "challenge_note": "액세서리로 보이는 상품명(케이스/충전기 등)이라 규칙 기반으로 걸러짐",
+                }
+            )
+        updated.append(proposal)
     return [p.model_dump() for p in updated]
 
 
@@ -338,7 +398,8 @@ class _ApplyChallengeNode(BaseAgent):
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         ranked = ctx.session.state.get("ranked_items") or []
         challenge_result = _parse_challenge_result(ctx.session.state.get("challenge_result"))
-        proposals = _apply_challenge_verdicts(ranked, challenge_result)
+        query = _resolved_query(ctx.session.state)
+        proposals = _apply_challenge_verdicts(ranked, challenge_result, query)
         yield Event(author=self.name, actions=EventActions(state_delta={"proposals": proposals}))
 
 
@@ -389,9 +450,8 @@ async def _refine_cache_store(callback_context, llm_response: LlmResponse) -> No
     original_query = callback_context.state.get("original_query", "")
     if not text or not original_query:
         return
-    try:
-        payload = RefinedQuery.model_validate_json(text).model_dump()
-    except Exception:
+    payload = _parse_refine_result(text)
+    if not payload.get("query"):
         return
     await llm_cache.exact_set(_REFINE_CACHE_NAMESPACE, original_query, payload)
     await llm_cache.semantic_set(_REFINE_CACHE_NAMESPACE, original_query, payload)
@@ -403,14 +463,20 @@ def _build_refine_agent() -> LlmAgent:
 
     return LlmAgent(
         name="refine",
+        # output_schema를 안 쓴다(2026-08-26, Qwen -> HCX 교체) - CLOVA
+        # Studio의 OpenAI 호환 엔드포인트는 response_format을 json_schema/
+        # json_object 둘 다 거부한다(실측 확인 - BadRequestError: "Invalid
+        # parameter: response_format"). app/agents/hcx.py의 기존 게이트
+        # (generate_query_variants)도 같은 이유로 response_format을 아예 안
+        # 주고 프롬프트 지시 + parse_json_object로만 JSON을 뽑는다 - 여기도
+        # 같은 패턴을 따른다(challenge와 동일한 원칙).
         model=LiteLlm(
-            model=f"openai/{settings.qwen_model}",
-            api_base=settings.qwen_api_base,
-            api_key=settings.qwen_api_key,
+            model=f"openai/{settings.hcx_model}",
+            api_base=settings.hcx_api_base,
+            api_key=settings.hcx_api_key,
             num_retries=0,
         ),
         instruction=instruction,
-        output_schema=RefinedQuery,
         output_key="refine_result",
         before_model_callback=[_skip_refine_if_already_specific, _refine_cache_lookup],
         after_model_callback=_refine_cache_store,
@@ -521,7 +587,7 @@ async def _judge_cache_store(callback_context, llm_response: LlmResponse) -> Non
 def _build_judge_agent() -> LlmAgent:
     def instruction(ctx: ReadonlyContext) -> str:
         query = _resolved_query(ctx.state)
-        candidates = _ranked_items(ctx.state)
+        candidates = _candidates_with_verdicts(ctx.state)
         return build_recommend_prompt(query, candidates)
 
     return LlmAgent(

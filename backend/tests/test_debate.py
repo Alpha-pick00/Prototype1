@@ -97,6 +97,38 @@ def test_search_candidates_dedupes_when_both_sorts_return_the_same_item(monkeypa
     assert [it["product_code"] for it in result] == ["acc"]
 
 
+def test_search_candidates_falls_back_to_empty_when_rescue_search_crashes(monkeypatch):
+    """2026-08-26 실측(50개 질의 배치 - "아이패드 프로") - 11번가가 sortCd="H"
+    보정 검색에 빈/깨진 XML을 돌려줘 xml.etree.ElementTree.ParseError로
+    파이프라인 전체가 죽었다. 보정 검색이 실패해도 최소한 1차 검색 결과는
+    그대로 써야 한다(전체가 죽으면 안 됨)."""
+    import xml.etree.ElementTree as ET
+
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        if sort_cd == "A":
+            return [_item("마그세이프 폰 마운트 그립 홀더 아이폰 17 용", price=14400, code="acc")]
+        raise ET.ParseError("no element found: line 1, column 0")
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+
+    assert [it["product_code"] for it in result] == ["acc"]
+
+
+def test_search_candidates_falls_back_to_empty_when_primary_search_crashes(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    async def _boom(query, limit=5, sort_cd="A"):
+        raise ET.ParseError("no element found: line 1, column 0")
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _boom)
+
+    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+
+    assert result == []
+
+
 def test_facet_resolved_true_when_option_already_in_query():
     assert _facet_resolved("메로나 빙그레", _facet("브랜드", ["빙그레", "롯데삼강"])) is True
 
