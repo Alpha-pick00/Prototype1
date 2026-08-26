@@ -367,3 +367,77 @@ async def looks_accessory_flooded(query: str, product_names: list[str]) -> bool:
         return data.get("has_genuine_product") is False
     except Exception:
         return False
+
+
+# 2026-08-26, 사용자 리포트("아이폰 17이나 16으로 검색할 때 왜 프로나 프로맥스만
+# 매핑이 되는거야") - 실측: "아이폰 17" keyword로 sortCd=A/H/D 세 정렬을 각각
+# 250개까지 넓혀도 "프로"가 안 붙은 순수 기본형 본체는 0건이었다(액세서리와
+# 프로/프로맥스 매물이 압도적으로 많아 표본 자체에 기본형이 안 들어옴).
+# looks_accessory_flooded와 구분되는 별개 문제다 - "본품이 아예 없다"가 아니라
+# "본품은 있는데 전부 상위 등급뿐이라 질의가 가리키는 정확한 등급이 없다".
+# _product_name_matches는 "아이폰 17 프로"도 "아이폰 17"과 같은 계열로 인정하는
+# 게(세대 전체를 가리키는 질의로도 흔히 쓰임) 의도된 설계라 이 문제를 못
+# 걸러낸다 - 표본 자체에 정확한 등급이 있는지는 의미 판단이 필요하다.
+#
+# 사용자 요청(2026-08-26, "아이폰 뿐만 아니라 ... 모든 상품을 검색했을 때
+# 검색 성능이 향상되도록") - 처음엔 재검색어에 "자급제"(휴대폰 전용 판매
+# 형태 표현)를 하드코딩했는데, 노트북/가전/식품 등 다른 카테고리에서는
+# 무의미하거나 오히려 검색을 실패시킬 수 있어(카테고리마다 "노이즈를 거르는
+# 표현"이 다르다 - 가전은 "정품", 식품은 "정품"/브랜드명 등) 판정과 동시에
+# 그 카테고리에 맞는 보정 키워드까지 LLM이 제안하도록 확장했다. hcx.
+# generate_query_variants(표기 변형 제안)와 같은 발상이지만 목적이 다르다 -
+# 그건 "같은 상품의 다른 표기"를, 이건 "같은 등급을 더 잘 찾는 부가 키워드"를
+# 찾는다.
+GRADE_MISMATCH_CHECK_INSTRUCTIONS = (
+    "당신은 쇼핑 검색어와 검색 결과 상품명 목록을 비교해, 검색어가 가리키는 "
+    "정확한 등급/모델의 본품이 실제로 목록에 있는지 판정하는 에이전트입니다. "
+    "예를 들어 검색어가 '아이폰 17'(기본형)인데 목록에 '아이폰 17 프로'나 "
+    "'아이폰 17 프로 맥스'만 있고 정작 기본형은 하나도 없을 수 있습니다 - 이런 "
+    "경우 상위/하위 등급이 검색어와 같은 제품 계열이라는 이유로 '있다'고 "
+    "판단하면 안 됩니다, 정확히 그 등급이어야만 '있다'입니다. 검색어가 원래 "
+    "특정 등급을 명시하지 않았다면(예: '노트북'처럼 등급 자체가 없는 질의) "
+    "이 문제가 성립하지 않으니 무조건 true로 답하세요. 목록에 검색어와 정확히 "
+    "같은 등급의 상품이 하나라도 있으면 exact_grade_present를 true로, 전부 "
+    "다른 등급뿐이면 false로 답하세요. 판단이 애매하면 true로 두세요(과도하게 "
+    "재검색을 유발하지 마세요).\n\n"
+    "exact_grade_present가 false일 때만, 검색어 뒤에 덧붙이면 그 카테고리에서 "
+    "액세서리/부속품/통신사 약정 상품 등 노이즈를 줄이고 정확한 등급의 본품을 "
+    "더 잘 찾을 수 있는 보정 키워드를 suggested_keyword에 하나 제안하세요 "
+    "(예: 휴대폰류는 '자급제', 그 외 카테고리는 상황에 맞게 - 확신이 없으면 "
+    "빈 문자열). exact_grade_present가 true면 suggested_keyword는 빈 문자열로 "
+    "두세요. 반드시 아래 JSON 형식으로만 답하세요. 다른 텍스트나 코드펜스를 "
+    "덧붙이지 마세요.\n\n"
+    '{"exact_grade_present": true, "suggested_keyword": ""}'
+)
+
+_MAX_GRADE_CHECK_ITEMS = 20
+
+
+def build_grade_mismatch_check_prompt(query: str, product_names: list[str]) -> str:
+    lines = "\n".join(f"- {name}" for name in product_names)
+    return f"{GRADE_MISMATCH_CHECK_INSTRUCTIONS}\n\n검색어: {query}\n\n상품 목록:\n{lines}"
+
+
+async def check_grade_mismatch(query: str, product_names: list[str]) -> str | None:
+    """질의가 가리키는 정확한 등급(예: "아이폰 17" 기본형)의 본품이 표본에
+    없고 다른 등급(프로/프로맥스 등)뿐이면, 재검색에 덧붙일 보정 키워드를
+    반환한다(카테고리 무관 - 휴대폰이 아니면 "자급제" 대신 그 카테고리에
+    맞는 키워드를 LLM이 판단). 등급이 이미 맞거나 애매하거나 실패하면 None
+    (보정 검색 트리거 안 함 - 그래프풀 폴백, 기존 동작 유지)."""
+    if not product_names or not settings.deepseek_api_key:
+        return None
+    try:
+        client = _client()
+        prompt = build_grade_mismatch_check_prompt(query, product_names[:_MAX_GRADE_CHECK_ITEMS])
+        response = await client.chat.completions.create(
+            model=settings.deepseek_model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        data = parse_json_object(response.choices[0].message.content or "")
+        if data.get("exact_grade_present") is not False:
+            return None
+        keyword = str(data.get("suggested_keyword") or "").strip()
+        return keyword or None
+    except Exception:
+        return None

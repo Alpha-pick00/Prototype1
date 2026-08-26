@@ -196,6 +196,73 @@ def test_search_candidates_no_rescue_when_llm_says_not_flooded(monkeypatch):
     assert [it["product_code"] for it in result] == ["real"]
 
 
+# ---------------------------------------------------------------------------
+# _search_candidates - 관련 후보는 있지만 전부 다른 등급뿐이라 질의가
+# 가리키는 정확한 등급이 표본에 없는 경우(2026-08-26, 사용자 리포트 - "아이폰
+# 17이나 16으로 검색할 때 왜 프로나 프로맥스만 매핑이 되는거야"). 실측:
+# "아이폰 17" 250개까지 넓혀도 기본형이 0건이었다 - 프로/프로맥스가 표본을
+# 압도했기 때문. 카테고리별로 다른 보정 키워드를 LLM이 제안한다(휴대폰
+# 전용인 "자급제"를 하드코딩하지 않음).
+# ---------------------------------------------------------------------------
+
+
+def test_search_candidates_rescues_via_grade_mismatch_keyword_when_only_higher_grade_found(monkeypatch):
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        if query == "아이폰 17":
+            return [_item("애플 아이폰 17 프로 맥스 256GB", price=2000000, code="pro")]
+        assert query == "아이폰 17 자급제"
+        return [_item("애플 아이폰 17 미국 버전 256GB 자급제", price=1800000, code="base")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _fake_grade_check(query, product_names):
+        assert query == "아이폰 17"
+        assert product_names == ["애플 아이폰 17 프로 맥스 256GB"]
+        return "자급제"
+
+    monkeypatch.setattr(debate.deepseek, "check_grade_mismatch", _fake_grade_check)
+
+    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+
+    codes = {it["product_code"] for it in result}
+    assert codes == {"pro", "base"}
+
+
+def test_search_candidates_skips_rescue_search_when_no_keyword_suggested(monkeypatch):
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        return [_item("애플 아이폰 17 프로 맥스 256GB", price=2000000, code="pro")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _fake_grade_check(query, product_names):
+        return None
+
+    monkeypatch.setattr(debate.deepseek, "check_grade_mismatch", _fake_grade_check)
+
+    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+
+    assert [it["product_code"] for it in result] == ["pro"]
+
+
+def test_search_candidates_skips_grade_check_when_no_relevant_items(monkeypatch):
+    """관련 후보 자체가 0개면(다른 이유로) 등급 편중 여부를 판단할 근거 자체가
+    없으므로 LLM 호출을 생략한다."""
+
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        return [_item("완전히 무관한 상품", price=1000, code="1")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _boom(query, product_names):
+        raise AssertionError("관련 후보가 없는데 등급 편중 확인이 호출됐다")
+
+    monkeypatch.setattr(debate.deepseek, "check_grade_mismatch", _boom)
+
+    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+
+    assert [it["product_code"] for it in result] == ["1"]
+
+
 def test_facet_resolved_true_when_option_already_in_query():
     assert _facet_resolved("메로나 빙그레", _facet("브랜드", ["빙그레", "롯데삼강"])) is True
 

@@ -127,6 +127,31 @@ async def _search_candidates(
             query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT, sort_cd="H"
         )
         items = price_table_module._dedupe_by_product_code(items + high_price_items)
+
+    # 2026-08-26, 사용자 리포트("아이폰 17이나 16으로 검색할 때 왜 프로나
+    # 프로맥스만 매핑이 되는거야", 이후 "아이폰 뿐만 아니라 ... 모든 상품을
+    # 검색했을 때 검색 성능이 향상되도록") - 액세서리 도배와는 별개 문제다:
+    # 관련성 필터를 통과한 후보는 있는데(그래서 위 액세서리 트리거는 안 걸림)
+    # 전부 상위 등급(프로/프로맥스)뿐이고 질의가 가리키는 정확한 등급(기본형)
+    # 매물은 sortCd=A/H 표본 어디에도 없는 경우(실측: "아이폰 17" 250개까지
+    # 넓혀도 기본형 0건). looks_accessory_flooded와 같은 비용 절감 원칙(키워드
+    # 트리거가 못 잡는 경우만 LLM 확인) - 이건 애초에 키워드로 잡을 수 있는
+    # 성격이 아니라(등급 문자열이 상품마다, 카테고리마다 제각각) 바로 LLM
+    # 판단으로 간다. 보정 키워드도 "자급제"로 하드코딩하지 않고 카테고리별로
+    # LLM이 제안(deepseek.check_grade_mismatch) - 휴대폰이 아닌 카테고리에
+    # "자급제"를 붙이면 오히려 검색이 실패할 수 있다.
+    relevant_after_rescue = [
+        it for it in items if price_table_module._product_name_matches(query, it["product_name"])
+    ]
+    if relevant_after_rescue and not force_price_rescue:
+        suggested_keyword = await deepseek.check_grade_mismatch(
+            query, [it["product_name"] for it in relevant_after_rescue]
+        )
+        if suggested_keyword:
+            genuine_items = await _search_elevenst_safely(
+                f"{query} {suggested_keyword}", limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT
+            )
+            items = price_table_module._dedupe_by_product_code(items + genuine_items)
     return items
 
 
