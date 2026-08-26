@@ -10,6 +10,7 @@ from . import facet_cache
 from . import llm_cache
 from . import price_table as price_table_module
 from .agents import deepseek, gpt, hcx
+from .exclusive_tokens import exclusive_tokens_conflict
 from .intent import extract_price_range, is_non_product_chitchat, looks_conversational_query, needs_clarification
 from .schemas import (
     ClarifyFacet,
@@ -854,6 +855,37 @@ def _strip_query_answered_options(query: str, facets: list[ClarifyFacet]) -> lis
     return result
 
 
+def _strip_cross_brand_options(query: str, facets: list[ClarifyFacet]) -> list[ClarifyFacet]:
+    """질의에 이미 특정 브랜드가 언급돼 있으면(예: "아이폰 17") 그 브랜드와
+    배타적인 다른 브랜드 옵션(예: "갤럭시 S26")은 제거한다(2026-08-26, 사용자
+    리포트 - "아이폰 17을 쳤는데 AI 상세검색에 갤럭시가 왜 떠"). 원인은
+    facet 추출 표본에 있다 - "아이폰/갤럭시 겸용 케이스"처럼 액세서리
+    상품명이 여러 브랜드를 한 상품명에 같이 나열하는 경우가 흔해, DeepSeek이
+    검색어와 무관한 브랜드까지 옵션으로 뽑아온다. exclusive_tokens.
+    EXCLUSIVE_GROUPS의 브랜드 그룹으로 판정한다 - _strip_query_answered_
+    options와 같은 구조(옵션이 다 안 걸러지면 그대로 두고, 2개 미만 남으면
+    facet 자체를 버림)."""
+    result: list[ClarifyFacet] = []
+    for facet in facets:
+        kept = [opt for opt in facet.options if not exclusive_tokens_conflict(query, opt)]
+        if len(kept) == len(facet.options):
+            result.append(facet)
+            continue
+        if len(dict.fromkeys(kept)) < 2:
+            continue
+        options_by_selection = None
+        if facet.options_by_selection:
+            filtered = {
+                selector: [v for v in values if v in kept]
+                for selector, values in facet.options_by_selection.items()
+            }
+            options_by_selection = {k: v for k, v in filtered.items() if v} or None
+        result.append(
+            ClarifyFacet(label=facet.label, options=kept, options_by_selection=options_by_selection)
+        )
+    return result
+
+
 async def check_clarify_facets(
     query: str,
     base_query: str | None = None,
@@ -946,6 +978,7 @@ async def check_clarify_facets(
     facets = await _extract_facets(query, names, persona)
     facets = [f for f in facets if f.label != "카테고리"]
     facets = _strip_query_answered_options(query, facets)
+    facets = _strip_cross_brand_options(query, facets)
     return ClarifyResponse(query=query, options=ClarifyOptions(facets=facets))
 
 

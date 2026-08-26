@@ -13,6 +13,7 @@ from app.debate import (
     _is_ambiguous_facets,
     _resolved_facet_count,
     _search_candidates,
+    _strip_cross_brand_options,
     _strip_resolved_facets,
 )
 from app.schemas import ClarifyFacet
@@ -109,6 +110,33 @@ def test_strip_resolved_facets_keeps_unresolved_facets():
     facets = [_facet("브랜드", ["빙그레", "롯데삼강"])]
 
     stripped = _strip_resolved_facets("메로나", facets)
+
+    assert stripped == facets
+
+
+def test_strip_cross_brand_options_removes_conflicting_brand():
+    """2026-08-26, 사용자 리포트 - "아이폰 17 쳤는데 AI 상세검색에 갤럭시가
+    왜 떠" - "아이폰/갤럭시 겸용 케이스" 같은 액세서리 상품명이 facet 추출
+    표본에 섞이면 검색어와 무관한 브랜드가 옵션으로 나온다."""
+    facets = [_facet("핸드폰 기종", ["아이폰 17 프로", "갤럭시 S26", "아이폰 17 프로 맥스"])]
+
+    stripped = _strip_cross_brand_options("아이폰 17", facets)
+
+    assert stripped[0].options == ["아이폰 17 프로", "아이폰 17 프로 맥스"]
+
+
+def test_strip_cross_brand_options_drops_facet_when_fewer_than_two_remain():
+    facets = [_facet("핸드폰 기종", ["아이폰 17 프로", "갤럭시 S26"])]
+
+    stripped = _strip_cross_brand_options("아이폰 17", facets)
+
+    assert stripped == []
+
+
+def test_strip_cross_brand_options_keeps_facet_unchanged_when_no_conflict():
+    facets = [_facet("용량", ["128GB", "256GB"])]
+
+    stripped = _strip_cross_brand_options("아이폰 17", facets)
 
     assert stripped == facets
 
