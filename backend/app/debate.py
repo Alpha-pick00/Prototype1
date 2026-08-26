@@ -102,7 +102,14 @@ async def _search_candidates(
 
     items = await _search_elevenst_safely(query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT)
     relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
-    if force_price_rescue or price_table_module.most_candidates_look_like_accessories(query, relevant):
+    needs_rescue = force_price_rescue or price_table_module.most_candidates_look_like_accessories(query, relevant)
+    if not needs_rescue and relevant:
+        # 키워드 트리거가 안 걸렸을 때만(비용 절감) LLM으로 한 번 더 확인한다
+        # (2026-08-26, 사용자 요청 - "비용 시간 늘어나도 일단 상품이 잘
+        # 매핑되어야 해"). 키워드 목록에 없는 표현을 쓴 액세서리 도배까지
+        # 의미로 잡아낸다.
+        needs_rescue = await deepseek.looks_accessory_flooded(query, [it["product_name"] for it in relevant])
+    if needs_rescue:
         high_price_items = await _search_elevenst_safely(
             query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT, sort_cd="H"
         )

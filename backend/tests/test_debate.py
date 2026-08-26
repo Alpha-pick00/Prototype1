@@ -118,6 +118,73 @@ def test_search_candidates_falls_back_to_empty_when_primary_search_crashes(monke
     assert result == []
 
 
+# ---------------------------------------------------------------------------
+# _search_candidates - 키워드 트리거가 놓친 액세서리 도배를 LLM으로 보완
+# (2026-08-26, 사용자 요청 - "비용 시간 늘어나도 일단 상품이 잘 매핑되어야
+# 해"). 키워드 목록에 없는 표현("주변기기" 등)을 쓴 액세서리는
+# most_candidates_look_like_accessories가 못 잡으므로, 그때만
+# deepseek.looks_accessory_flooded로 한 번 더 확인한다.
+# ---------------------------------------------------------------------------
+
+
+def test_search_candidates_rescues_via_llm_when_keyword_trigger_misses_it(monkeypatch):
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        if sort_cd == "A":
+            # "주변기기"는 액세서리 지시어 목록에 없어 키워드 트리거를 못
+            # 태운다 - 실측 재현.
+            return [_item("신세기 에반게리온 애니메이션 주변기기 아이폰 17", price=12400, code="acc")]
+        return [_item("Apple 아이폰 17 프로 맥스 2TB 자급제", price=5500000, code="real")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _fake_flooded(query, product_names):
+        assert query == "아이폰 17"
+        assert product_names == ["신세기 에반게리온 애니메이션 주변기기 아이폰 17"]
+        return True
+
+    monkeypatch.setattr(debate.deepseek, "looks_accessory_flooded", _fake_flooded)
+
+    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+
+    codes = {it["product_code"] for it in result}
+    assert codes == {"acc", "real"}
+
+
+def test_search_candidates_skips_llm_check_when_keyword_trigger_already_fired(monkeypatch):
+    """비용 절감 - 키워드 트리거가 이미 걸렸으면 LLM 호출 자체를 안 한다."""
+
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        if sort_cd == "A":
+            return [_item("마그세이프 폰 마운트 그립 홀더 아이폰 17 용", price=14400, code="acc")]
+        return [_item("Apple 아이폰 17 프로 맥스 2TB 자급제", price=5500000, code="real")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _boom(query, product_names):
+        raise AssertionError("키워드 트리거가 이미 걸렸는데 LLM 확인까지 호출됐다")
+
+    monkeypatch.setattr(debate.deepseek, "looks_accessory_flooded", _boom)
+
+    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+    codes = {it["product_code"] for it in result}
+    assert codes == {"acc", "real"}
+
+
+def test_search_candidates_no_rescue_when_llm_says_not_flooded(monkeypatch):
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        return [_item("삼성 갤럭시 버즈 3 무선 이어버드", price=225800, code="real")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _fake_flooded(query, product_names):
+        return False
+
+    monkeypatch.setattr(debate.deepseek, "looks_accessory_flooded", _fake_flooded)
+
+    result = asyncio.run(_search_candidates("갤럭시 버즈3", base_query=None))
+    assert [it["product_code"] for it in result] == ["real"]
+
+
 def test_facet_resolved_true_when_option_already_in_query():
     assert _facet_resolved("메로나 빙그레", _facet("브랜드", ["빙그레", "롯데삼강"])) is True
 
