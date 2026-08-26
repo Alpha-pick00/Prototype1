@@ -559,4 +559,4 @@ sequenceDiagram
 - Supabase 기반 LLM 응답 캐시(`app/llm_cache.py`)는 스키마(`supabase/llm_cache.sql`)와 코드는 준비돼 있지만 실제 프로젝트 secret key가 아직 없어 비활성 상태(no-op) - 연결하면 별도 배포 작업 없이 바로 켜짐
 - HCX 검색어 표기 변형 재검색(`app/agents/hcx.py::generate_query_variants`)은 1차 검색 실패 시에만 타는 폴백이라 평소 검색 속도에는 영향 없지만, 그 경로 자체는 추가 LLM 호출 + 재검색으로 몇 초 더 걸림
 - 정량적 그라운딩 회귀 측정 하네스가 없다(다나와/ADK 시절 스크립트는 2026-08-26에 함께 제거됨) - 현재 파이프라인(`app.adk_pipeline`) 기준으로 다시 만드는 게 후속 과제
-- 관련성 가드가 상당 부분 명시적 단어 목록(`ACCESSORY_TERMS`, `_ACCESSORY_INDICATOR_TOKENS`)에 의존해 구조적으로 두더지 잡기다 - 목록에 없는 표현(예: "무선마이크", "충전 스탠드")은 매번 실측으로 발견해야 추가할 수 있다. challenge(DeepSeek) 단계가 의미 기반으로 이 한계를 일부 보완하지만, 그마저도 카테고리 자체가 완전히 낯선 액세서리는 놓칠 수 있음
+- 관련성 가드가 상당 부분 명시적 단어 목록(`ACCESSORY_TERMS`, `_ACCESSORY_INDICATOR_TOKENS`)에 의존해 구조적으로 두더지 잡기였다 - 목록에 없는 표현(예: "무선마이크", "충전 스탠드")은 매번 실측으로 발견해야 추가할 수 있었음. 키워드 트리거가 안 걸릴 때만 DeepSeek(`deepseek.looks_accessory_flooded`)로 의미 기반 재확인을 한 번 더 걸고(비용 절감을 위해 키워드가 이미 걸리면 건너뜀), challenge 단계도 별도로 의미 기반 검증을 하므로 이 한계는 대부분 보완됐지만, 두 의미 기반 검증 모두 후보가 이미 검색 결과에 존재해야 판단할 수 있다는 한계는 남음
