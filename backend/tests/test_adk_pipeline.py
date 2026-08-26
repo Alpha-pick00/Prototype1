@@ -141,6 +141,29 @@ def test_apply_challenge_verdicts_does_not_override_when_challenge_already_flagg
     assert proposals[0]["challenge_note"] == "본품이 아닌 액세서리"
 
 
+def test_candidates_with_verdicts_overlays_verified_from_proposals():
+    """2026-08-26, 사용자 리포트 - "골프공 검색했는데 골프파우치가 최종
+    추천으로 뜸". judge 프롬프트용 후보에 challenge 검증 결과(verified/
+    challenge_note)가 실려야 judge가 그 판정을 보고 피할 수 있다."""
+    state = {
+        "ranked_items": [_item("골프공 12개입", 15000, code="1"), _item("골프파우치", 9900, code="2")],
+        "proposals": [
+            {"verified": True, "challenge_note": None},
+            {"verified": False, "challenge_note": "본품이 아닌 파우치"},
+        ],
+    }
+    candidates = adk_pipeline._candidates_with_verdicts(state)
+    assert candidates[0]["verified"] is True
+    assert candidates[1]["verified"] is False
+    assert candidates[1]["challenge_note"] == "본품이 아닌 파우치"
+
+
+def test_candidates_with_verdicts_omits_verified_when_no_proposals_yet():
+    state = {"ranked_items": [_item("A", 1000, code="1")], "proposals": []}
+    candidates = adk_pipeline._candidates_with_verdicts(state)
+    assert "verified" not in candidates[0]
+
+
 def test_resolved_query_prefers_refine_result_over_original():
     state = {"original_query": "원본", "refine_result": {"query": "정제됨"}}
     assert adk_pipeline._resolved_query(state) == "정제됨"

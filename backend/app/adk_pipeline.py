@@ -167,6 +167,23 @@ def _ranked_items(state: dict) -> list[elevenst.ElevenstSearchItem]:
     return state.get("ranked_items") or []
 
 
+def _candidates_with_verdicts(state: dict) -> list[dict]:
+    """judge 프롬프트용 후보 목록 - `_ranked_items`(가격/판매자 등 원본
+    필드)에 apply_challenge가 만든 `proposals`의 verified/challenge_note를
+    index 기준으로 덧씌운다(2026-08-26, 사용자 리포트 - "골프공 검색했는데
+    골프파우치가 최종 추천으로 뜸"). judge는 이전까지 challenge 검증 결과를
+    아예 못 보고 골랐다 - 두 검증 단계가 서로 대화를 안 하고 있었다."""
+    proposals = state.get("proposals") or []
+    merged = []
+    for i, item in enumerate(_ranked_items(state)):
+        candidate = dict(item)
+        if i < len(proposals):
+            candidate["verified"] = proposals[i].get("verified")
+            candidate["challenge_note"] = proposals[i].get("challenge_note")
+        merged.append(candidate)
+    return merged
+
+
 def _model_error_fallback_response(text: str) -> LlmResponse:
     """모델 호출이 실패했을 때 성공한 것처럼 대신 흘려보낼 최소 응답 - ADK가 이
     텍스트를 실제 모델 응답과 동일하게 output_key/output_schema 경로로 흘려
@@ -533,7 +550,7 @@ async def _judge_cache_store(callback_context, llm_response: LlmResponse) -> Non
 def _build_judge_agent() -> LlmAgent:
     def instruction(ctx: ReadonlyContext) -> str:
         query = _resolved_query(ctx.state)
-        candidates = _ranked_items(ctx.state)
+        candidates = _candidates_with_verdicts(ctx.state)
         return build_recommend_prompt(query, candidates)
 
     return LlmAgent(

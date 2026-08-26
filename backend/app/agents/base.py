@@ -1,6 +1,14 @@
 import json
 import re
 
+# 2026-08-26, 사용자 리포트("골프공 검색했는데 골프파우치가 최종 추천으로
+# 뜸") - challenge(DeepSeek)가 "본품이 아닌 액세서리"로 이미 verified=False
+# 판정한 후보를, judge(이 프롬프트)가 그 판정을 전혀 못 보고 그대로 최종
+# 추천으로 골랐다. 원인은 build_recommend_prompt가 verified/challenge_note를
+# 아예 안 받아왔던 것 - challenge와 judge, 두 검증 단계가 서로 대화를 안
+# 하고 있었다. 아래 "[검증 실패: ...]" 표시와 그걸 피하라는 지시를 추가한다 -
+# candidates에 verified 키가 없으면(옛 비-ADK 경로, run_elevenst_only_debate는
+# challenge 자체가 없음) 아무 표시도 안 붙어 기존 동작 그대로다.
 RECOMMEND_INSTRUCTIONS = (
     "당신은 검증된 쇼핑 후보 중 사용자에게 가장 추천할 만한 상품 하나를 고르는 "
     "에이전트입니다. 아래 후보는 전부 실제 검색으로 존재가 확인된 상품입니다 "
@@ -8,6 +16,11 @@ RECOMMEND_INSTRUCTIONS = (
     "구매만족도·판매자를 함께 보고 판단하되, 가격 차이가 크지 않은 후보끼리는 "
     "리뷰가 많고 구매만족도가 높은 쪽을 우선하세요. 후보는 이미 질의와의 "
     "관련도 순으로 정렬돼 있습니다. "
+    "일부 후보에는 '[검증 실패: ...]' 표시가 붙어있을 수 있습니다 - 별도 검증"
+    "단계가 그 후보를 본품이 아닌 액세서리/다른 상품으로 의심된다고 판단한"
+    "것입니다. 그런 표시가 없는 후보가 하나라도 있으면 반드시 그중에서 "
+    "고르세요 - [검증 실패] 후보는 그런 후보가 하나도 없을 때만 최후의 "
+    "수단으로 고르세요. "
     "반드시 아래 후보 목록의 index 중 하나를 골라 JSON으로만 답하세요. 다른 "
     "텍스트나 코드펜스를 덧붙이지 마세요.\n\n"
     "reasoning은 사용자에게 그대로 노출되는 문장입니다 - 아래 후보 목록의 "
@@ -20,11 +33,16 @@ RECOMMEND_INSTRUCTIONS = (
 
 
 def build_recommend_prompt(query: str, candidates: list[dict]) -> str:
-    lines = [
-        f"[{i}] {c['product_name']} / {c['price_krw']:,}원 / 판매자: {c['seller']} / "
-        f"리뷰 {c.get('review_count')}건 / 구매만족도 {c.get('buy_satisfy')}"
-        for i, c in enumerate(candidates)
-    ]
+    lines = []
+    for i, c in enumerate(candidates):
+        line = (
+            f"[{i}] {c['product_name']} / {c['price_krw']:,}원 / 판매자: {c['seller']} / "
+            f"리뷰 {c.get('review_count')}건 / 구매만족도 {c.get('buy_satisfy')}"
+        )
+        if c.get("verified") is False:
+            note = c.get("challenge_note")
+            line += f" / [검증 실패: {note}]" if note else " / [검증 실패]"
+        lines.append(line)
     candidates_block = "\n".join(lines) or "(후보 없음)"
     return f"{RECOMMEND_INSTRUCTIONS}\n\n사용자 질의: {query}\n\n후보:\n{candidates_block}"
 

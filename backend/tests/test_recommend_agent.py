@@ -6,7 +6,44 @@ from __future__ import annotations
 import asyncio
 
 from app import debate
+from app.agents.base import build_recommend_prompt
 from fetchers.elevenst import ElevenstSearchItem
+
+
+# ---------------------------------------------------------------------------
+# build_recommend_prompt - verified=False 후보에 [검증 실패] 표시(2026-08-26,
+# 사용자 리포트 - "골프공 검색했는데 골프파우치가 최종 추천으로 뜸". judge가
+# challenge 검증 결과를 아예 못 보고 골랐던 문제).
+# ---------------------------------------------------------------------------
+
+
+def test_build_recommend_prompt_flags_verified_false_candidate():
+    candidates = [
+        {"product_name": "골프공 12개입", "price_krw": 15000, "seller": "판매자"},
+        {
+            "product_name": "골프파우치",
+            "price_krw": 9900,
+            "seller": "판매자",
+            "verified": False,
+            "challenge_note": "본품이 아닌 파우치",
+        },
+    ]
+    prompt = build_recommend_prompt("골프공", candidates)
+    candidates_block = prompt.rsplit("후보:\n", 1)[1]
+    assert candidates_block.startswith("[0] 골프공 12개입")
+    lines = candidates_block.splitlines()
+    assert "[검증 실패" not in lines[0]
+    assert "[검증 실패: 본품이 아닌 파우치]" in lines[1]
+
+
+def test_build_recommend_prompt_omits_flag_when_verified_key_missing():
+    """옛 비-ADK 경로(run_elevenst_only_debate)는 challenge 자체가 없어 후보
+    dict에 verified 키가 아예 없다 - 이 경우 프롬프트가 기존과 동일해야
+    한다(회귀 없음)."""
+    candidates = [{"product_name": "A", "price_krw": 1000, "seller": "판매자"}]
+    prompt = build_recommend_prompt("질의", candidates)
+    candidates_block = prompt.rsplit("후보:\n", 1)[1]
+    assert "[검증 실패" not in candidates_block
 
 
 def _item(
