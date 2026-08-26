@@ -1018,7 +1018,42 @@ async def check_clarify_facets(
     facets = [f for f in facets if f.label != "카테고리"]
     facets = _strip_query_answered_options(query, facets)
     facets = _strip_cross_brand_options(query, facets)
+    facets = _strip_accessory_options(query, facets)
     return ClarifyResponse(query=query, options=ClarifyOptions(facets=facets))
+
+
+def _strip_accessory_options(query: str, facets: list[ClarifyFacet]) -> list[ClarifyFacet]:
+    """facet 옵션 값 자체가 액세서리 지시어(price_table._ACCESSORY_INDICATOR_TOKENS -
+    "케이스"/"충전기"/"거치대"/"어댑터"/"스마트톡" 등)면 라벨이 뭐든 걸러낸다
+    (2026-08-26, 사용자 리포트 "아이폰 17 쳤을때 케이스가 뜨는데" - 실측 재현:
+    "제품분류" facet에 "휴대폰 케이스"/"어댑터"/"차량용 충전기"/"스마트톡"이
+    선택지로 나왔다). 카테고리 라벨만 걸러내던 기존 필터(위)는 DeepSeek이
+    같은 축을 "제품분류" 등 다른 이름으로 뽑아오면 무력화된다 - 라벨명이
+    아니라 값 자체를 본다. 질의가 실제로 액세서리를 찾는 거면(예: "아이폰
+    케이스") 그 값을 보여주는 게 정상이라 걸러내지 않는다
+    (exclusive_tokens.accessory_mismatch와 같은 가드)."""
+    if price_table_module._looks_like_accessory(query):
+        return facets
+    result: list[ClarifyFacet] = []
+    for facet in facets:
+        kept = [opt for opt in facet.options if not price_table_module._looks_like_accessory(opt)]
+        if len(kept) == len(facet.options):
+            # 아무것도 안 걸러졌으면 원래 facet을 그대로 둔다(_strip_query_
+            # answered_options와 같은 이유) - 옵션이 원래부터 1개뿐인 경우까지
+            # 이 필터가 건드릴 이유는 없다.
+            result.append(facet)
+            continue
+        if len(kept) < 2:
+            continue
+        options_by_selection = None
+        if facet.options_by_selection:
+            filtered = {
+                selector: [v for v in values if v in kept]
+                for selector, values in facet.options_by_selection.items()
+            }
+            options_by_selection = {k: v for k, v in filtered.items() if v} or None
+        result.append(ClarifyFacet(label=facet.label, options=kept, options_by_selection=options_by_selection))
+    return result
 
 
 def _facet_options_for_query(query: str, facet: ClarifyFacet) -> list[str]:

@@ -1042,6 +1042,53 @@ def test_check_clarify_facets_never_asks_category(monkeypatch):
     assert "카테고리" not in by_label
 
 
+def test_check_clarify_facets_strips_accessory_options_regardless_of_label(monkeypatch):
+    """2026-08-26 사용자 리포트("아이폰 17 쳤을때 케이스가 뜨는데") 재현 -
+    DeepSeek이 액세서리 축을 "카테고리"가 아니라 "제품분류"로 뽑아오면 위
+    라벨 기반 필터(test_check_clarify_facets_never_asks_category)를 그냥
+    통과한다. 라벨이 아니라 옵션 값 자체(케이스/충전기/어댑터 등)를 봐야
+    한다."""
+
+    async def _fake_search(query, limit=90):
+        return [{"pcode": "1", "product_name": "아이폰 17 프로 맥스 256GB", "total_mall_count": None}]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _fake_extract_facets(query, names):
+        return [
+            ClarifyFacet(label="핸드폰 기종", options=["아이폰 17 프로", "아이폰 17 프로 맥스", "아이폰 16"]),
+            ClarifyFacet(label="제품분류", options=["휴대폰 케이스", "어댑터", "차량용 충전기"]),
+        ]
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
+
+    result = asyncio.run(check_clarify_facets("아이폰 17"))
+
+    by_label = {f.label: f for f in result.options.facets}
+    assert "제품분류" not in by_label
+    assert by_label["핸드폰 기종"].options == ["아이폰 17 프로", "아이폰 17 프로 맥스", "아이폰 16"]
+
+
+def test_check_clarify_facets_keeps_accessory_options_when_query_is_accessory_itself(monkeypatch):
+    """질의 자체가 액세서리를 찾는 거면("아이폰 케이스") 액세서리 옵션을
+    보여주는 게 정상이라 걸러내면 안 된다."""
+
+    async def _fake_search(query, limit=90):
+        return [{"pcode": "1", "product_name": "아이폰 17 클리어 케이스", "total_mall_count": None}]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    async def _fake_extract_facets(query, names):
+        return [ClarifyFacet(label="케이스형태", options=["클리어케이스", "젤리케이스", "범퍼케이스"])]
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
+
+    result = asyncio.run(check_clarify_facets("아이폰 케이스"))
+
+    by_label = {f.label: f for f in result.options.facets}
+    assert by_label["케이스형태"].options == ["클리어케이스", "젤리케이스", "범퍼케이스"]
+
+
 def test_check_clarify_facets_does_not_research_when_category_already_selected(monkeypatch):
     """HITL 구조적 필터 재설계(2026-08-20, "텍스트 재검색 말고 다른 방식으로") -
     카테고리를 이미 골랐어도(질의에 그 이름이 있어도) 그 이름을 검색어에
