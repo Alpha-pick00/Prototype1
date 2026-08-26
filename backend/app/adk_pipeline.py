@@ -156,10 +156,35 @@ def _build_challenge_prompt(query: str, candidates: list[dict]) -> str:
     return f"{_CHALLENGE_INSTRUCTIONS}\n\n사용자 질의: {query}\n\n후보:\n{block}"
 
 
+def _parse_refine_result(text: str) -> dict:
+    """refine(HCX) 응답을 {"query": "..."} dict로 파싱한다. output_schema
+    없이(HCX가 json_schema/json_object 둘 다 거부해 2026-08-26에 뺐다)
+    도는 이후로는 응답 형식이 프롬프트 지시를 안정적으로 안 지킨다(실측 -
+    `{"query": "저렴한 아기 간식"}`을 지시했는데 그냥 `"저렴한 아기 간식"`
+    (JSON 객체가 아니라 순수 문자열 리터럴)만 돌아온 사례 확인). 정상
+    형식(`{...}`)을 먼저 시도하고, 실패하면 문자열 리터럴(`"..."`)로도
+    시도한다 - 둘 다 안 되면 빈 dict(호출부가 원본 질의로 폴백)."""
+    try:
+        return parse_json_object(text)
+    except (ValueError, TypeError):
+        pass
+    try:
+        value = json.loads(text.strip())
+    except (ValueError, TypeError):
+        return {}
+    return {"query": value} if isinstance(value, str) else {}
+
+
 def _resolved_query(state: dict) -> str:
     """refine 단계 결과(refine_result.query)가 있으면 그걸, 없으면(스킵/실패)
-    원본 질의를 쓴다."""
-    refine_result = state.get("refine_result") or {}
+    원본 질의를 쓴다. refine이 output_schema 없이 도는 이후로 `refine_result`
+    는 ADK가 파싱해주지 않은 원문 텍스트일 수 있다 - `_parse_refine_result`로
+    여기서 직접 파싱한다(challenge의 `_parse_challenge_result`와 동일한
+    이유/패턴)."""
+    refine_result = state.get("refine_result")
+    if isinstance(refine_result, str):
+        refine_result = _parse_refine_result(refine_result)
+    refine_result = refine_result or {}
     return refine_result.get("query") or state.get("original_query") or ""
 
 
@@ -418,9 +443,8 @@ async def _refine_cache_store(callback_context, llm_response: LlmResponse) -> No
     original_query = callback_context.state.get("original_query", "")
     if not text or not original_query:
         return
-    try:
-        payload = RefinedQuery.model_validate_json(text).model_dump()
-    except Exception:
+    payload = _parse_refine_result(text)
+    if not payload.get("query"):
         return
     await llm_cache.exact_set(_REFINE_CACHE_NAMESPACE, original_query, payload)
     await llm_cache.semantic_set(_REFINE_CACHE_NAMESPACE, original_query, payload)
@@ -432,14 +456,20 @@ def _build_refine_agent() -> LlmAgent:
 
     return LlmAgent(
         name="refine",
+        # output_schema를 안 쓴다(2026-08-26, Qwen -> HCX 교체) - CLOVA
+        # Studio의 OpenAI 호환 엔드포인트는 response_format을 json_schema/
+        # json_object 둘 다 거부한다(실측 확인 - BadRequestError: "Invalid
+        # parameter: response_format"). app/agents/hcx.py의 기존 게이트
+        # (generate_query_variants)도 같은 이유로 response_format을 아예 안
+        # 주고 프롬프트 지시 + parse_json_object로만 JSON을 뽑는다 - 여기도
+        # 같은 패턴을 따른다(challenge와 동일한 원칙).
         model=LiteLlm(
-            model=f"openai/{settings.qwen_model}",
-            api_base=settings.qwen_api_base,
-            api_key=settings.qwen_api_key,
+            model=f"openai/{settings.hcx_model}",
+            api_base=settings.hcx_api_base,
+            api_key=settings.hcx_api_key,
             num_retries=0,
         ),
         instruction=instruction,
-        output_schema=RefinedQuery,
         output_key="refine_result",
         before_model_callback=[_skip_refine_if_already_specific, _refine_cache_lookup],
         after_model_callback=_refine_cache_store,

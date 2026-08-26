@@ -174,6 +174,28 @@ def test_resolved_query_falls_back_to_original_when_refine_missing():
     assert adk_pipeline._resolved_query(state) == "원본"
 
 
+def test_resolved_query_parses_raw_text_refine_result():
+    """2026-08-26, refine을 Qwen -> HCX로 교체 - HCX는 response_format을
+    전혀 지원하지 않아 output_schema를 뺐다. output_schema 없이는 ADK가
+    refine_result를 dict로 파싱해주지 않고 원문 텍스트 그대로 state에
+    남긴다 - _resolved_query가 직접 파싱해야 한다."""
+    state = {"original_query": "원본", "refine_result": '{"query": "정제됨", "error": null}'}
+    assert adk_pipeline._resolved_query(state) == "정제됨"
+
+
+def test_resolved_query_falls_back_to_original_when_refine_result_text_malformed():
+    state = {"original_query": "원본", "refine_result": "이건 JSON이 아님"}
+    assert adk_pipeline._resolved_query(state) == "원본"
+
+
+def test_resolved_query_parses_bare_json_string_literal_refine_result():
+    """실측(2026-08-26, HCX 전환 후) - 프롬프트가 `{"query": "..."}`를
+    지시해도 HCX가 그냥 `"저렴한 아기 간식"`(JSON 객체가 아니라 순수 문자열
+    리터럴)만 돌려준 사례가 있었다 - 이 경우도 정제 결과로 인정해야 한다."""
+    state = {"original_query": "저렴한 아기 간식을 사고 싶어", "refine_result": '"저렴한 아기 간식"'}
+    assert adk_pipeline._resolved_query(state) == "저렴한 아기 간식"
+
+
 def test_judge_recommended_returns_none_for_sentinel_index():
     state = {"judge_result": {"index": -1, "reasoning": ""}, "ranked_items": [_item("A", 1000)]}
     assert adk_pipeline._judge_recommended(state) is None
