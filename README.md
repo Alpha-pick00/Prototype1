@@ -15,7 +15,7 @@ alpha-pick-jet.vercel.app
 > (정제 → 검색 → 3모델 병렬 제안 → 교차검증 → 심사) 파이프라인 전체를 걷어내고 11번가
 > 오픈 API(ProductSearch, 1st-party 구조화 데이터) 하나로 통일했다. 2026-08-26에 Google
 > ADK를 **단일 소스(11번가) 전용 8단계 `SequentialAgent`**로 다시 들여왔다 - 예전처럼
-> 여러 모델이 후보를 각자 "제안"하는 구조가 아니라, refine(Qwen) → 검색 →
+> 여러 모델이 후보를 각자 "제안"하는 구조가 아니라, refine(HCX) → 검색 →
 > propose(11번가 결과를 그대로 후보로 포장, 사실상 1-way) → filter_merge(관련성 검증 +
 > 관련도 랭킹 + 의심 후보 후순위화) → extract_pages(중복 제거) → challenge(DeepSeek 그라운딩
 > 검증) → apply_challenge → judge(Qwen 최종 선택)를 ADK의 상태 관리·재시도·캐시 콜백으로
@@ -48,7 +48,7 @@ flowchart LR
     end
 
     subgraph CORE["ADK 8단계 SequentialAgent(app/adk_pipeline.py)"]
-        REFINE["1 refine<br/>(Qwen 직접 - 대화체만 정제)"]
+        REFINE["1 refine<br/>(HCX - 대화체만 정제)"]
         SEARCH11["2 search<br/>(11번가, 액세서리 도배 감지 시<br/>sortCd=H 보정검색)"]
         PROPOSE["3 propose<br/>(11번가 결과 그대로 포장)"]
         FILTERMERGE["4 filter_merge<br/>(관련성 검증 + 관련도 랭킹<br/>+ 의심 후보 후순위화)"]
@@ -68,8 +68,8 @@ flowchart LR
 
     subgraph EXT["외부 서비스"]
         ELEVENST["11번가 오픈 API<br/>(ProductSearch)"]
-        QWEN["Qwen(DashScope)<br/>임베딩 · refine · judge(최종 추천)"]
-        HCX["HCX(HyperCLOVA X)<br/>검색어 표기 변형"]
+        QWEN["Qwen(DashScope)<br/>임베딩 · judge(최종 추천)"]
+        HCX["HCX(HyperCLOVA X)<br/>refine · 검색어 표기 변형"]
         GROQ["Groq<br/>OCR 정제"]
         DEEPSEEKAI["DeepSeek<br/>facet 추출 · challenge 그라운딩 검증"]
         VISION["Google Vision OCR"]
@@ -90,7 +90,7 @@ flowchart LR
     FILTERMERGE --> DEDUP --> CHALLENGE --> APPLYCH --> JUDGE
     SEARCH11 --> ELEVENST
     VARIANT --> HCX
-    REFINE --> QWEN
+    REFINE --> HCX
     FILTERMERGE --> QWEN
     CHALLENGE --> DEEPSEEKAI
     JUDGE --> QWEN
@@ -117,7 +117,7 @@ flowchart LR
 | Backend | FastAPI, Python, httpx, PyJWT |
 | 검색 | 11번가 오픈 API(ProductSearch) - 1st-party 구조화 데이터, 스크래핑 없음 |
 | 관련성 검증 | rapidfuzz 토큰 유사도 + 모델/규격 토큰 충돌 가드 + 상호배타 토큰 가드 + 액세서리 오매칭 가드(`_product_name_matches`) - 검색어와 실제로 일치하는 상품만 후보로 인정. 신제품 등 검색 결과가 액세서리로 도배돼(가격 오름차순 특성상 저가 액세서리가 먼저 잡힘) 관련 상품이 안 걸리면 `sortCd="H"`(가격 내림차순) 보정 검색을 한 번 더 붙여 병합 |
-| 그라운딩 검증 | DeepSeek(challenge 단계) - 관련성 검증을 통과한 상위 후보를 의미 기반으로 다시 검증(`verified`/`challenge_note`). 상위 후보가 전부 미검증으로 나오면 가격 보정 검색을 강제로 켠 채 파이프라인을 한 번 더(최대 1회) 실행 |
+| 그라운딩 검증 | DeepSeek(challenge 단계) - 관련성 검증을 통과한 상위 후보를 의미 기반으로 다시 검증(`verified`/`challenge_note`), judge 프롬프트에도 "[검증 실패: ...]" 표시로 그대로 전달돼 최종 선택에 반영됨. 상위 후보가 전부 미검증으로 나오면 가격 보정 검색을 강제로 켠 채 파이프라인을 한 번 더(최대 1회) 실행 |
 | 추천 Agent | ADK 8단계 `SequentialAgent`(`app/adk_pipeline.py`) - Qwen 임베딩(`text-embedding-v3`)으로 후보를 관련도순 정렬 → 시세 대비 파격 저가·"미개봉"/"완납" 등 약정 의심 문구가 있는 후보는 코드로 후순위 배치 → Qwen(judge 단계)이 가격·리뷰·구매만족도·판매자 리스팅 수를 종합해 최종 추천 선택(실패 시 최저가 규칙 기반 폴백) |
 | 검색어 표기 변형 | HCX(HyperCLOVA X, HCX-DASH-002) - 1차 검색이 관련 상품을 못 찾으면 카탈로그 표기 차이(예: "2프로"↔"이프로"↔"2%")를 추론해 대안 표기로 재검색 |
 | Human-in-the-loop | DeepSeek가 11번가 검색 상품명 목록에서 facet(라벨 자유, 상호 교차 필터링)을 추출. 카테고리 축은 되묻지 않고(11번가가 카테고리 필터 미지원), 드릴다운 후속 턴은 재검색 대신 순수 로컬 필터링으로 후보군을 좁힘 |
@@ -208,7 +208,7 @@ flowchart LR
 | 2026-08-20 | **다나와 스크래핑 + Tavily 검색 + Google ADK 멀티에이전트 디베이트 파이프라인 전체 제거, 11번가 오픈 API(ProductSearch) 하나로 통일**(현재 아키텍처의 골격) · 추천 Agent 추가(Qwen 임베딩 관련도 랭킹 + LLM 최종 선택, 실패 시 최저가 폴백) · HITL을 쿼리 재구성 재검색 방식에서 구조적 로컬 필터링으로 재설계(카테고리 축은 11번가가 필터 미지원이라 되묻지 않음) · Supabase 기반 LLM 응답 캐시(KV+시맨틱) 스캐폴딩 · Qwen "thinking mode" 비활성화로 응답 지연 20~95초 → 2~5초 단축 · Groq 기반 검색어 표기 변형 폴백 추가("2프로"/"이프로"/"2%" 매핑) · GitHub 브랜치 보호 규칙 추가(main은 최소 1인 승인 필수) |
 | 2026-08-21 | 브랜드 단축검색/대량구매 생성 경로 + 고정 4축 clarify UI(`FixedAxisClarifyCard`) + 미사용 `skip_intent_check` 요청 필드 제거 · README 팀원 구성 절을 커밋 이력 기반 상세 기여 목록으로 확장(개인 포트폴리오용) · 검색어 표기 변형 폴백을 Groq에서 HCX(HyperCLOVA X, `HCX-DASH-002`)로 교체 |
 | 2026-08-24 | README 전면 재검증 - 코드와 실제로 다른 서술 발견해 정정: 프론트 `GradientChatInput`(실제로는 `Hero`) · 존재하지 않는 "사운드" 기능 서술 · 어디서도 호출 안 되는 죽은 `search_categories`/Categories API를 현재 데이터 소스처럼 서술하던 부분 · `scripts/grounding_regression.py`가 제거된 `debate.run_single_debate`를 호출해 실행하면 깨지는 상태(2026-08-20부터)라는 사실 미기재 · "GitHub Actions(CI)" 표기가 실제로는 테스트 게이팅 없는 배포 전용 워크플로였던 것 · AI 상세검색 facet 다중 선택 지원(`_filter_items_by_facet_answers` 신규 도입, 이때는 관련성 가드가 없었음) |
-| 2026-08-25 ~ 26 | 단발 검색 표본을 10 → 30개로 확대(가격대 다양성 확보 목적) · Qwen(DashScope) 쿼터 소진으로 "gpt" 슬롯(추천 Agent·질의 정제)을 임시로 HCX 호출로 전환 · **신뢰 신호 기반 의심 후보 후순위화 도입**: 동일 판매자 리스팅 수 · 시세(중앙값) 대비 파격 저가 · "미개봉"/"완납" 등 약정 의심 문구 3가지를 신호로 반영, 처음엔 프롬프트 경고 문구로만 얹었으나 HCX가 반복 무시하는 걸 실측(2회 재현)해 코드 레벨 후순위 정렬(`deprioritize_suspicious`)로 전환 · facet 드릴다운 경로의 관련성 가드 누락 발견·수정(8/24 도입분 - 케이스/무선마이크 등 액세서리가 그대로 추천되던 버그) · 액세서리 단어 블랙리스트(`ACCESSORY_TERMS`) 보강 · 신제품 등 검색어가 짧고 일반적일 때 가격 오름차순 정렬이 저가 액세서리로 표본을 채워 본품이 후보에서 아예 밀려나는 구조적 문제 발견, `sortCd="H"`(가격 내림차순) 보정 검색 도입(`most_candidates_look_like_accessories` 트리거) · **Google ADK를 단일 소스(11번가) 전용 8단계 `SequentialAgent`로 재도입**(refine → search → propose → filter_merge → extract_pages → challenge(DeepSeek 그라운딩 검증) → apply_challenge → judge, 상위 후보 전부 미검증이면 보정 검색 강제 후 1회 재실행) · HITL이 숫자 포함 검색어를 무조건 스킵하던 버그 수정 · AI 상세검색 facet에 검색어와 무관한 폰 브랜드가 섞이는 문제 수정 |
+| 2026-08-25 ~ 26 | 단발 검색 표본을 10 → 30개로 확대(가격대 다양성 확보 목적) · Qwen(DashScope) 쿼터 소진으로 "gpt" 슬롯(추천 Agent·질의 정제)을 임시로 HCX 호출로 전환 · **신뢰 신호 기반 의심 후보 후순위화 도입**: 동일 판매자 리스팅 수 · 시세(중앙값) 대비 파격 저가 · "미개봉"/"완납" 등 약정 의심 문구 3가지를 신호로 반영, 처음엔 프롬프트 경고 문구로만 얹었으나 HCX가 반복 무시하는 걸 실측(2회 재현)해 코드 레벨 후순위 정렬(`deprioritize_suspicious`)로 전환 · facet 드릴다운 경로의 관련성 가드 누락 발견·수정(8/24 도입분 - 케이스/무선마이크 등 액세서리가 그대로 추천되던 버그) · 액세서리 단어 블랙리스트(`ACCESSORY_TERMS`) 보강 · 신제품 등 검색어가 짧고 일반적일 때 가격 오름차순 정렬이 저가 액세서리로 표본을 채워 본품이 후보에서 아예 밀려나는 구조적 문제 발견, `sortCd="H"`(가격 내림차순) 보정 검색 도입(`most_candidates_look_like_accessories` 트리거) · **Google ADK를 단일 소스(11번가) 전용 8단계 `SequentialAgent`로 재도입**(refine → search → propose → filter_merge → extract_pages → challenge(DeepSeek 그라운딩 검증) → apply_challenge → judge, 상위 후보 전부 미검증이면 보정 검색 강제 후 1회 재실행) · HITL이 숫자 포함 검색어를 무조건 스킵하던 버그 수정 · AI 상세검색 facet에 검색어와 무관한 폰 브랜드가 섞이는 문제 수정 · 1단계 refine을 Qwen에서 HCX로 교체 · judge가 challenge 검증 결과를 못 보고 최종 추천을 고르던 문제 수정(두 단계를 잇는 `_candidates_with_verdicts` 추가, judge 프롬프트에 "[검증 실패: ...]" 표시) · challenge가 놓친 명백한 액세서리를 규칙 기반으로 한 번 더 검증하는 보강 · `_search_candidates`가 11번가 검색 실패(깨진 XML 등) 시 파이프라인 전체를 죽이던 문제 수정 |
 
 ### 주요 의사결정 사항
 
@@ -321,8 +321,8 @@ sequenceDiagram
 
     U->>CTX: 검색어 입력(첫 턴)
     CTX->>B: POST /decide/stream (base_query 없음)
-    B->>Q: 1 refine(대화체 질의만 정제, 이미 구체적이면 스킵)
-    Q-->>B: 정제된 질의
+    B->>H: 1 refine(대화체 질의만 정제, 이미 구체적이면 스킵)
+    H-->>B: 정제된 질의
     B->>E: 2 search - ProductSearch(query, limit=30, sortCd=A)
     E-->>B: 검색 결과
     B->>B: 4 filter_merge - 관련성 검증(_product_name_matches)
@@ -374,7 +374,7 @@ sequenceDiagram
 **내부 플로우** (`app.adk_pipeline.run_stream` - ADK `SequentialAgent` 8단계)
 
 1. `status` 이벤트 즉시 전송 → 프론트가 "11번가에서 검색하고 있습니다" 표시
-2. **refine**: 대화체 질의만(`looks_conversational_query`) Qwen에게 정제 요청, 이미 구체적이면 LLM 호출 자체를 건너뜀
+2. **refine**: 대화체 질의만(`looks_conversational_query`) HCX에게 정제 요청, 이미 구체적이면 LLM 호출 자체를 건너뜀
 3. **search**: `base_query`가 있으면 90개 검색 후 로컬 필터링, 없으면 `query`로 30개 직접 검색(11번가 `ProductSearch`, `sortCd=A` 가격 오름차순)
 4. **propose**: 검색 결과를 그대로 후보 풀로 포장(11번가 단일 소스라 LLM 추정 없이 그대로 사용)
 5. **filter_merge**: `_product_name_matches`(rapidfuzz 토큰 유사도 + 모델/규격 충돌 가드 + 상호배타 토큰 가드 + 액세서리 오매칭 가드)로 관련 없는 결과 제거 - 0건이면 임베딩 의미 유사도 구제 → 그래도 0건이면 `_search_with_query_variants`가 HCX에게 대안 표기를 물어 재검색. 관련성 검증을 통과한 후보 대부분이 액세서리 지시어를 달고 있으면(신제품 등 가격 오름차순 표본이 저가 액세서리로 채워진 경우) `sortCd=H`(가격 내림차순) 보정 검색을 추가로 붙여 병합. 그래도 0건이면 `RuntimeError` → `error` 이벤트로 스트리밍되고 흐름 종료. 검증된 후보는 Qwen 임베딩(`text-embedding-v3`) 코사인 유사도로 관련도순 정렬한 뒤, 시세(중앙값) 대비 파격 저가이거나 "미개봉"/"완납" 등 약정 의심 문구가 있는 후보를 뒤로 재정렬(`deprioritize_suspicious`) - 이 순서 그대로가 응답의 `proposals`
