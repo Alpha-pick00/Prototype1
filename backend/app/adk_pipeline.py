@@ -28,10 +28,21 @@ relaxed_fallback/comparison_page_listing_fallback 같은 다나와 전용 완화
 `debate.py`의 `_build_decision`이 이미 갖고 있는 "judge 실패 시 최저가
 규칙 폴백"을 그대로 재사용한다 - 그래야 challenge/judge 중 하나가 실패해도
 검색 자체는 성공했는데 결과를 아예 못 주는 회귀가 안 생긴다.
+
+refine/challenge/judge(실제 LLM을 부르는 3단계) 모두 `app.llm_cache`
+(Supabase KV+시맨틱, HITL의 facet 추출이 이미 쓰던 것과 같은 모듈)로
+캐시된다(2026-08-26) - before_model_callback에서 캐시를 먼저 찾아보고
+히트하면 실제 모델 호출 자체를 건너뛴다. challenge/judge는 질의 텍스트만이
+아니라 후보 목록 서명(_candidate_cache_signature)까지 캐시 키에 넣는다 -
+같은 질의라도 재고/가격 변동으로 후보 구성이 달라지면 옛 index 기준
+verdict/판단을 새 후보에 잘못 재사용하게 되기 때문이다. on_model_error_
+callback의 폴백 응답(빈 verdicts/index=-1)은 캐시하지 않는다 - API 실패를
+캐시해버리면 다음 동일 요청도 영원히 실패한 것처럼 처리된다.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any, AsyncGenerator, AsyncIterator
@@ -48,8 +59,9 @@ from pydantic import BaseModel
 
 from fetchers import elevenst
 
+from . import llm_cache
 from . import price_table as price_table_module
-from .agents.base import build_recommend_prompt, build_refine_query_prompt
+from .agents.base import build_recommend_prompt, build_refine_query_prompt, parse_json_object
 from .config import settings
 from .debate import (
     _build_decision,
@@ -71,6 +83,39 @@ _APP_NAME = "alpha_pick_adk_pipeline"
 # _MAX_CANDIDATE_NOTES=5, 옛 파이프라인의 _MAX_EXTRACT_CANDIDATES=10과 같은
 # 원칙 - "상위 후보만 추가로 신경 쓴다").
 _MAX_CHALLENGE_CANDIDATES = 10
+
+# 2026-08-26 - 8단계 중 실제 LLM을 부르는 refine/challenge/judge에
+# app.llm_cache(기존 AI 상세검색 facet 추출이 쓰던 것과 같은 Supabase KV+
+# 시맨틱 캐시)를 붙인다 - 회귀 테스트처럼 같은 질의가 반복되면 토큰/지연
+# 비용 없이 이전 응답을 재사용한다. namespace는 HITL의 "clarify_facets"와
+# 겹치지 않게 단계별로 분리한다.
+_REFINE_CACHE_NAMESPACE = "pipeline_refine"
+_CHALLENGE_CACHE_NAMESPACE = "pipeline_challenge"
+_JUDGE_CACHE_NAMESPACE = "pipeline_judge"
+
+
+def _candidate_cache_signature(items: list[dict]) -> str:
+    """challenge/judge 캐시 키에 후보 구성을 반영한다 - 같은 질의라도 재고/
+    가격 변동으로 검색 결과가 달라지면 다른 키로 취급해야, 옛 후보 순서에
+    매겨진 index(verdicts/judge_result)를 새 후보에 잘못 재사용하지 않는다.
+    refine은 후보와 무관(질의 정제는 검색 전 단계)이라 이 서명이 필요 없다."""
+    return "|".join(f"{it.get('product_code') or it.get('url')}:{it['price_krw']}" for it in items)
+
+
+def _pipeline_cache_key(query: str, candidates: list[dict]) -> str:
+    return f"{query}::{_candidate_cache_signature(candidates)}"
+
+
+def _llm_response_text(llm_response: LlmResponse) -> str:
+    """ADK의 `__maybe_save_output_to_state`와 같은 필터를 쓴다 - thinking을
+    지원하는 모델(Qwen 등)은 reasoning_content를 별도의 thought=True Part로
+    돌려주는데(LiteLlm이 변환), 이걸 안 걸러내면 최종 JSON 앞뒤로 영어
+    추론 과정이 뒤섞여 parse_json_object가 여러 개의 `{...}` 조각을 통째로
+    긁어버려 파싱이 실패한다(2026-08-26 실측 - judge 캐시가 이 필터 누락
+    때문에 저장에 계속 실패했다)."""
+    if not llm_response.content or not llm_response.content.parts:
+        return ""
+    return "".join(part.text for part in llm_response.content.parts if part.text and not part.thought)
 
 
 class _ChallengeVerdict(BaseModel):
@@ -142,8 +187,9 @@ class _ElevenstSearchNode(BaseAgent):
         query = _resolved_query(state)
         base_query = await _refine_base_query(state.get("base_query"), original_query, query)
         facet_answers = state.get("facet_answers")
+        force_price_rescue = bool(state.get("force_price_rescue"))
 
-        items = await _search_candidates(query, base_query, facet_answers)
+        items = await _search_candidates(query, base_query, facet_answers, force_price_rescue)
 
         yield Event(
             author=self.name,
@@ -232,6 +278,27 @@ class _DedupPagesNode(BaseAgent):
         yield Event(author=self.name, actions=EventActions(state_delta={"ranked_items": deduped}))
 
 
+def _parse_challenge_result(raw: Any) -> dict:
+    """challenge(DeepSeek) 응답을 dict로 파싱한다. challenge는 더 이상
+    ADK output_schema를 쓰지 않는다 - DeepSeek API가 `response_format:
+    json_schema`(output_schema가 LiteLlm을 거쳐 요청하는 strict 구조화
+    출력 모드)를 "This response_format type is unavailable now"로 거부해
+    매 호출이 실패했었다(2026-08-26 확인). 대신 이 코드베이스의 다른 모든
+    게이트(gpt.py)와 같은 패턴 - 프롬프트로 JSON 형식만 지시하고
+    `parse_json_object`로 직접 파싱 - 으로 바꿔, DeepSeek이 이미 지원하는
+    `json_object` 모드로 호출한다. 파싱 실패(모델이 형식을 안 지켰거나
+    on_model_error_callback의 폴백 텍스트가 아닌 경우)는 "검증 없음"과
+    동일하게 빈 dict로 흘려보낸다 - challenge 실패가 파이프라인 전체를
+    막으면 안 된다는 원칙은 그대로 유지."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return parse_json_object(str(raw or ""))
+    except (ValueError, TypeError):
+        logger.warning("challenge 응답 JSON 파싱 실패 - 검증 없이 계속 진행: %r", raw)
+        return {}
+
+
 def _apply_challenge_verdicts(
     ranked: list[elevenst.ElevenstSearchItem], challenge_result: dict
 ) -> list[dict]:
@@ -263,7 +330,7 @@ class _ApplyChallengeNode(BaseAgent):
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         ranked = ctx.session.state.get("ranked_items") or []
-        challenge_result = ctx.session.state.get("challenge_result") or {}
+        challenge_result = _parse_challenge_result(ctx.session.state.get("challenge_result"))
         proposals = _apply_challenge_verdicts(ranked, challenge_result)
         yield Event(author=self.name, actions=EventActions(state_delta={"proposals": proposals}))
 
@@ -291,6 +358,38 @@ def _on_refine_error(callback_context, llm_request, error) -> LlmResponse | None
     return _model_error_fallback_response(fallback.model_dump_json())
 
 
+async def _refine_cache_lookup(callback_context, llm_request) -> LlmResponse | None:
+    """`_skip_refine_if_already_specific` 다음에 붙는 두 번째 before_model_
+    callback(리스트 순서상 그게 먼저 걸러내고 남은, 즉 "정제가 실제로
+    필요한" 질의만 여기까지 온다) - 같은 원본 질의를 HITL의 facet 캐시와
+    같은 방식(exact + semantic)으로 재사용한다."""
+    original_query = callback_context.state.get("original_query", "")
+    if not original_query:
+        return None
+    cached = await llm_cache.exact_get(
+        _REFINE_CACHE_NAMESPACE, original_query
+    ) or await llm_cache.semantic_get(_REFINE_CACHE_NAMESPACE, original_query)
+    if cached is None:
+        return None
+    return _model_error_fallback_response(json.dumps(cached, ensure_ascii=False))
+
+
+async def _refine_cache_store(callback_context, llm_response: LlmResponse) -> None:
+    """실제 refine 호출이 성공했을 때만(캐시 히트/스킵은 이 콜백 자체를 안
+    탄다 - before_model_callback이 응답을 대신하면 after_model_callback은
+    호출되지 않는 ADK의 동작) 결과를 캐시에 저장한다."""
+    text = _llm_response_text(llm_response)
+    original_query = callback_context.state.get("original_query", "")
+    if not text or not original_query:
+        return
+    try:
+        payload = RefinedQuery.model_validate_json(text).model_dump()
+    except Exception:
+        return
+    await llm_cache.exact_set(_REFINE_CACHE_NAMESPACE, original_query, payload)
+    await llm_cache.semantic_set(_REFINE_CACHE_NAMESPACE, original_query, payload)
+
+
 def _build_refine_agent() -> LlmAgent:
     def instruction(ctx: ReadonlyContext) -> str:
         return build_refine_query_prompt(ctx.state.get("original_query", ""))
@@ -306,7 +405,8 @@ def _build_refine_agent() -> LlmAgent:
         instruction=instruction,
         output_schema=RefinedQuery,
         output_key="refine_result",
-        before_model_callback=_skip_refine_if_already_specific,
+        before_model_callback=[_skip_refine_if_already_specific, _refine_cache_lookup],
+        after_model_callback=_refine_cache_store,
         on_model_error_callback=_on_refine_error,
     )
 
@@ -319,18 +419,57 @@ def _on_challenge_error(callback_context, llm_request, error) -> LlmResponse | N
     return _model_error_fallback_response(_ChallengeResult(verdicts=[]).model_dump_json())
 
 
+def _challenge_candidates(state: dict) -> list[dict]:
+    return _ranked_items(state)[:_MAX_CHALLENGE_CANDIDATES]
+
+
+async def _challenge_cache_lookup(callback_context, llm_request) -> LlmResponse | None:
+    candidates = _challenge_candidates(callback_context.state)
+    if not candidates:
+        return None
+    key = _pipeline_cache_key(_resolved_query(callback_context.state), candidates)
+    cached = await llm_cache.exact_get(_CHALLENGE_CACHE_NAMESPACE, key)
+    if cached is None:
+        return None
+    return _model_error_fallback_response(json.dumps(cached, ensure_ascii=False))
+
+
+async def _challenge_cache_store(callback_context, llm_response: LlmResponse) -> None:
+    """`_on_challenge_error`의 빈 verdicts 폴백은 캐시하지 않는다 - 그걸
+    "검증해봤더니 문제없음"으로 저장해버리면, 이번엔 API가 일시적으로
+    실패했을 뿐인데 다음 동일 질의/후보 조합에서도 영원히 검증을 건너뛰게
+    된다(실패를 결론으로 착각하는 게 캐시 안 하는 것보다 나쁘다)."""
+    candidates = _challenge_candidates(callback_context.state)
+    if not candidates:
+        return
+    parsed = _parse_challenge_result(_llm_response_text(llm_response))
+    if not parsed.get("verdicts"):
+        return
+    key = _pipeline_cache_key(_resolved_query(callback_context.state), candidates)
+    await llm_cache.exact_set(_CHALLENGE_CACHE_NAMESPACE, key, parsed)
+
+
 def _build_challenge_agent() -> LlmAgent:
     def instruction(ctx: ReadonlyContext) -> str:
         query = _resolved_query(ctx.state)
-        candidates = _ranked_items(ctx.state)[:_MAX_CHALLENGE_CANDIDATES]
+        candidates = _challenge_candidates(ctx.state)
         return _build_challenge_prompt(query, candidates)
 
     return LlmAgent(
         name="challenge",
-        model=LiteLlm(model=f"deepseek/{settings.deepseek_model}", num_retries=0),
+        # output_schema를 안 쓴다 - DeepSeek이 그게 유발하는
+        # response_format:json_schema(strict 구조화 출력)를 거부한다
+        # (_parse_challenge_result 참고). response_format을 json_object로만
+        # 요청해 다른 게이트들과 같은, DeepSeek이 실제로 지원하는 모드를 쓴다.
+        model=LiteLlm(
+            model=f"deepseek/{settings.deepseek_model}",
+            num_retries=0,
+            response_format={"type": "json_object"},
+        ),
         instruction=instruction,
-        output_schema=_ChallengeResult,
         output_key="challenge_result",
+        before_model_callback=_challenge_cache_lookup,
+        after_model_callback=_challenge_cache_store,
         on_model_error_callback=_on_challenge_error,
     )
 
@@ -341,6 +480,35 @@ def _on_judge_error(callback_context, llm_request, error) -> LlmResponse | None:
     규칙 폴백을 그대로 탄다(지금 `gpt.recommend_best` 실패 시 동작과 동일)."""
     logger.warning("judge 단계 모델 호출 실패 - 최저가 규칙 폴백으로 이어짐", exc_info=error)
     return _model_error_fallback_response(_JudgeVerdict(index=-1, reasoning="").model_dump_json())
+
+
+async def _judge_cache_lookup(callback_context, llm_request) -> LlmResponse | None:
+    candidates = _ranked_items(callback_context.state)
+    if not candidates:
+        return None
+    key = _pipeline_cache_key(_resolved_query(callback_context.state), candidates)
+    cached = await llm_cache.exact_get(_JUDGE_CACHE_NAMESPACE, key)
+    if cached is None:
+        return None
+    return _model_error_fallback_response(json.dumps(cached, ensure_ascii=False))
+
+
+async def _judge_cache_store(callback_context, llm_response: LlmResponse) -> None:
+    """`_on_judge_error`의 index=-1 센티널은 캐시하지 않는다 - challenge와
+    같은 이유(_challenge_cache_store 참고): API 실패를 "판단 없음"이라는
+    결론으로 굳혀버리면 안 된다."""
+    candidates = _ranked_items(callback_context.state)
+    if not candidates:
+        return
+    text = _llm_response_text(llm_response)
+    try:
+        parsed = parse_json_object(text)
+    except (ValueError, TypeError):
+        return
+    if parsed.get("index", -1) == -1:
+        return
+    key = _pipeline_cache_key(_resolved_query(callback_context.state), candidates)
+    await llm_cache.exact_set(_JUDGE_CACHE_NAMESPACE, key, parsed)
 
 
 def _build_judge_agent() -> LlmAgent:
@@ -360,6 +528,8 @@ def _build_judge_agent() -> LlmAgent:
         instruction=instruction,
         output_schema=_JudgeVerdict,
         output_key="judge_result",
+        before_model_callback=_judge_cache_lookup,
+        after_model_callback=_judge_cache_store,
         on_model_error_callback=_on_judge_error,
     )
 
@@ -408,24 +578,29 @@ def _judge_recommended(state: dict) -> tuple[int, str] | None:
     return index, str(judge_result.get("reasoning") or "").strip()
 
 
-async def run_stream(
-    query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
-) -> AsyncIterator[dict[str, Any]]:
-    """`debate.run_elevenst_only_debate_stream`과 정확히 같은 이벤트 계약
-    (status/final/error)을 유지한다 - main.py가 어느 구현을 부르는지와
-    무관하게 프론트는 그대로 동작한다."""
+async def _run_pipeline_once(
+    query: str,
+    base_query: str | None,
+    facet_answers: dict[str, list[str]] | None,
+    force_price_rescue: bool,
+) -> tuple[dict | None, str | None]:
+    """파이프라인을 끝까지 한 번 돌리고 (최종 세션 state, 실패 메시지)를
+    돌려준다 - 실패면 (None, 메시지), 성공이면 (state, None). run_stream이
+    최초 1회 + 필요시 가격 보정 재시도 1회, 최대 2번 이 함수를 부른다."""
     runner = _get_runner()
     session_id = str(uuid.uuid4())
     await runner.session_service.create_session(
         app_name=_APP_NAME,
         user_id="anonymous",
         session_id=session_id,
-        state={"original_query": query, "base_query": base_query, "facet_answers": facet_answers},
+        state={
+            "original_query": query,
+            "base_query": base_query,
+            "facet_answers": facet_answers,
+            "force_price_rescue": force_price_rescue,
+        },
     )
 
-    yield {"type": "status", "stage": "searching"}
-
-    pipeline_failed_message: str | None = None
     gen = runner.run_async(
         user_id="anonymous",
         session_id=session_id,
@@ -435,19 +610,56 @@ async def run_stream(
         async for _event in gen:
             pass
     except RuntimeError as exc:
-        pipeline_failed_message = str(exc)
+        return None, str(exc)
     except Exception:
         logger.exception("ADK 파이프라인 실행 실패: %r", query)
-        pipeline_failed_message = "구매 결정을 처리하는 중 오류가 발생했습니다."
-
-    if pipeline_failed_message is not None:
-        yield {"type": "error", "message": pipeline_failed_message}
-        return
+        return None, "구매 결정을 처리하는 중 오류가 발생했습니다."
 
     final_session = await runner.session_service.get_session(
         app_name=_APP_NAME, user_id="anonymous", session_id=session_id
     )
-    state: dict = dict(final_session.state) if final_session else {}
+    return (dict(final_session.state) if final_session else {}), None
+
+
+def _all_proposals_unverified(proposals: list[dict]) -> bool:
+    """challenge(DeepSeek)가 상위 후보를 전부 verified=False로 판정했는지 -
+    `_search_candidates`의 로컬 액세서리 단어 트리거(price_table.
+    all_candidates_look_like_accessories)가 놓친 케이스를 잡는 두 번째
+    안전망이다. 단어 목록은 카테고리 커버리지가 늘 부족한데(2026-08-26
+    실측 - "에반게리온 아이폰 케이스"의 "주변기기"가 목록에 없어 트리거를
+    못 태웠다), 이건 의미 기반(DeepSeek) 판정 결과만 보므로 그 한계가
+    없다."""
+    return bool(proposals) and all(p.get("verified") is False for p in proposals)
+
+
+async def run_stream(
+    query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
+) -> AsyncIterator[dict[str, Any]]:
+    """`debate.run_elevenst_only_debate_stream`과 정확히 같은 이벤트 계약
+    (status/final/error)을 유지한다 - main.py가 어느 구현을 부르는지와
+    무관하게 프론트는 그대로 동작한다.
+
+    challenge가 상위 후보를 전부 verified=False로 판정하면(2026-08-26)
+    sortCd="H" 보정 검색을 강제로 켠 채 파이프라인을 한 번만 더 돌린다 -
+    무한 재시도를 막기 위해 최대 1회. 재시도가 또 실패하거나 후보를 못
+    찾으면 첫 시도 결과를 그대로 쓴다(둘 다 나쁘면 최소한 처음 것이라도
+    사용자에게 보여준다)."""
+    yield {"type": "status", "stage": "searching"}
+
+    state, pipeline_failed_message = await _run_pipeline_once(
+        query, base_query, facet_answers, force_price_rescue=False
+    )
+
+    if state is not None and _all_proposals_unverified(state.get("proposals") or []):
+        rescued_state, rescued_error = await _run_pipeline_once(
+            query, base_query, facet_answers, force_price_rescue=True
+        )
+        if rescued_error is None and rescued_state.get("ranked_items") and rescued_state.get("proposals"):
+            state, pipeline_failed_message = rescued_state, None
+
+    if pipeline_failed_message is not None:
+        yield {"type": "error", "message": pipeline_failed_message}
+        return
 
     ranked = _ranked_items(state)
     proposals_raw = state.get("proposals") or []

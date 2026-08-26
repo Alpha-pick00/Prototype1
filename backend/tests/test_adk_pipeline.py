@@ -17,8 +17,25 @@ from __future__ import annotations
 
 import asyncio
 
-from app import adk_pipeline
+from google.adk.models import LlmResponse
+from google.genai import types
+
+from app import adk_pipeline, llm_cache
 from fetchers.elevenst import ElevenstSearchItem
+
+
+class _FakeCallbackContext:
+    """실제 ADK CallbackContext 대신 쓰는 최소 스텁 - 캐시 콜백은
+    `.state.get(...)`만 읽으므로 이 정도로 충분하다(모듈 docstring의 "ADK/
+    LiteLlm 계층을 직접 목킹하지 않는다" 원칙과 별개 - 이건 ADK가 호출하는
+    콜백 "함수"를 직접 단위 테스트하는 것이지 ADK 내부를 흉내내는 게 아니다)."""
+
+    def __init__(self, state: dict):
+        self.state = state
+
+
+def _llm_response(text: str) -> LlmResponse:
+    return LlmResponse(content=types.Content(role="model", parts=[types.Part(text=text)]))
 
 
 def _item(
@@ -56,6 +73,17 @@ def test_dedupe_items_falls_back_to_url_when_product_code_missing():
     b = _item("A 복사본", 1000, code="", url="https://example.com/a")
     deduped = adk_pipeline._dedupe_items([a, b])
     assert len(deduped) == 1
+
+
+def test_parse_challenge_result_parses_json_object_mode_response():
+    raw = '{"verdicts": [{"index": 0, "verified": false, "note": "다른 상품"}]}'
+    assert adk_pipeline._parse_challenge_result(raw) == {
+        "verdicts": [{"index": 0, "verified": False, "note": "다른 상품"}]
+    }
+
+
+def test_parse_challenge_result_returns_empty_dict_on_malformed_text():
+    assert adk_pipeline._parse_challenge_result("이건 JSON이 아님") == {}
 
 
 def test_apply_challenge_verdicts_overlays_verified_and_note_by_index():
@@ -110,6 +138,27 @@ def test_build_challenge_prompt_includes_query_and_indexed_candidates():
     assert "129,000원" in prompt
 
 
+def test_all_proposals_unverified_true_when_every_proposal_verified_false():
+    proposals = [{"verified": False}, {"verified": False}]
+    assert adk_pipeline._all_proposals_unverified(proposals) is True
+
+
+def test_all_proposals_unverified_false_when_one_verified_true():
+    proposals = [{"verified": False}, {"verified": True}]
+    assert adk_pipeline._all_proposals_unverified(proposals) is False
+
+
+def test_all_proposals_unverified_false_when_unchecked():
+    """verified=None(challenge가 아예 안 다룬 후보, 검증 안 됨)은
+    verified=False(검증해봤는데 아니라고 판정됨)와 다르다 - 재시도 트리거가
+    아니다."""
+    assert adk_pipeline._all_proposals_unverified([{"verified": None}]) is False
+
+
+def test_all_proposals_unverified_false_for_empty_list():
+    assert adk_pipeline._all_proposals_unverified([]) is False
+
+
 # ---------------------------------------------------------------------------
 # run()/run_stream() 통합 - 실제 SequentialAgent 오케스트레이션을 그대로
 # 태우되, 네트워크가 필요한 지점만 몽키패치한다.
@@ -117,7 +166,7 @@ def test_build_challenge_prompt_includes_query_and_indexed_candidates():
 
 
 def test_run_stream_raises_runtime_error_when_no_relevant_candidates(monkeypatch):
-    async def _empty_search(query, base_query, facet_answers):
+    async def _empty_search(query, base_query, facet_answers, force_price_rescue=False):
         return []
 
     monkeypatch.setattr(adk_pipeline, "_search_candidates", _empty_search)
@@ -142,7 +191,7 @@ def test_run_stream_raises_runtime_error_when_no_relevant_candidates(monkeypatch
 
 
 def test_run_raises_runtime_error_when_no_relevant_candidates(monkeypatch):
-    async def _empty_search(query, base_query, facet_answers):
+    async def _empty_search(query, base_query, facet_answers, force_price_rescue=False):
         return []
 
     monkeypatch.setattr(adk_pipeline, "_search_candidates", _empty_search)
@@ -159,3 +208,175 @@ def test_run_raises_runtime_error_when_no_relevant_candidates(monkeypatch):
         raise AssertionError("RuntimeError가 발생해야 한다")
     except RuntimeError as exc:
         assert "관련성 있는 상품을 찾지 못했습니다" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# refine/challenge/judge 캐시 콜백(2026-08-26) - llm_cache.exact_get/set을
+# 인메모리 dict로 몽키패치해 실제 Supabase 없이 콜백 로직만 검증한다.
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_cache_signature_differs_when_price_changes():
+    a = [_item("A", 1000, code="1")]
+    b = [_item("A", 1200, code="1")]
+    assert adk_pipeline._candidate_cache_signature(a) != adk_pipeline._candidate_cache_signature(b)
+
+
+def test_llm_response_text_joins_text_parts():
+    assert adk_pipeline._llm_response_text(_llm_response('{"query": "나이키"}')) == '{"query": "나이키"}'
+
+
+def test_refine_cache_lookup_returns_none_on_miss(monkeypatch):
+    async def _miss(namespace, query):
+        return None
+
+    monkeypatch.setattr(llm_cache, "exact_get", _miss)
+    monkeypatch.setattr(llm_cache, "semantic_get", _miss)
+
+    ctx = _FakeCallbackContext({"original_query": "나이키 신발 사고싶어"})
+    result = asyncio.run(adk_pipeline._refine_cache_lookup(ctx, llm_request=None))
+    assert result is None
+
+
+def test_refine_cache_lookup_returns_cached_response_on_hit(monkeypatch):
+    async def _hit(namespace, query):
+        assert query == "나이키 신발 사고싶어"
+        return {"query": "나이키 신발"}
+
+    monkeypatch.setattr(llm_cache, "exact_get", _hit)
+
+    ctx = _FakeCallbackContext({"original_query": "나이키 신발 사고싶어"})
+    result = asyncio.run(adk_pipeline._refine_cache_lookup(ctx, llm_request=None))
+    assert result is not None
+    assert adk_pipeline._llm_response_text(result) == '{"query": "나이키 신발"}'
+
+
+def test_refine_cache_store_saves_parsed_result(monkeypatch):
+    saved = {}
+
+    async def _exact_set(namespace, query, response):
+        saved["exact"] = (namespace, query, response)
+
+    async def _semantic_set(namespace, query, response):
+        saved["semantic"] = (namespace, query, response)
+
+    monkeypatch.setattr(llm_cache, "exact_set", _exact_set)
+    monkeypatch.setattr(llm_cache, "semantic_set", _semantic_set)
+
+    ctx = _FakeCallbackContext({"original_query": "나이키 신발 사고싶어"})
+    asyncio.run(
+        adk_pipeline._refine_cache_store(ctx, _llm_response('{"query": "나이키 신발"}'))
+    )
+
+    namespace, query, response = saved["exact"]
+    assert (namespace, query) == (adk_pipeline._REFINE_CACHE_NAMESPACE, "나이키 신발 사고싶어")
+    assert response["query"] == "나이키 신발"
+    assert saved["semantic"][2]["query"] == "나이키 신발"
+
+
+def test_challenge_cache_lookup_keys_on_query_and_candidates(monkeypatch):
+    seen_key = {}
+
+    async def _hit(namespace, query):
+        seen_key["namespace"] = namespace
+        seen_key["query"] = query
+        return {"verdicts": [{"index": 0, "verified": False, "note": "다른 상품"}]}
+
+    monkeypatch.setattr(llm_cache, "exact_get", _hit)
+
+    ranked = [_item("나이키 카드지갑", 14400, code="1")]
+    ctx = _FakeCallbackContext({"original_query": "나이키 에어포스1", "ranked_items": ranked})
+    result = asyncio.run(adk_pipeline._challenge_cache_lookup(ctx, llm_request=None))
+
+    assert seen_key["namespace"] == adk_pipeline._CHALLENGE_CACHE_NAMESPACE
+    assert seen_key["query"] == adk_pipeline._pipeline_cache_key("나이키 에어포스1", ranked)
+    assert result is not None
+
+
+def test_challenge_cache_lookup_returns_none_when_no_candidates(monkeypatch):
+    async def _boom(namespace, query):
+        raise AssertionError("후보가 없는데 캐시를 조회했다")
+
+    monkeypatch.setattr(llm_cache, "exact_get", _boom)
+
+    ctx = _FakeCallbackContext({"original_query": "나이키 에어포스1", "ranked_items": []})
+    assert asyncio.run(adk_pipeline._challenge_cache_lookup(ctx, llm_request=None)) is None
+
+
+def test_challenge_cache_store_skips_empty_verdicts_fallback(monkeypatch):
+    """_on_challenge_error가 합성한 빈 verdicts 폴백은 캐시하면 안 된다 -
+    API 일시 실패를 "검증해봤더니 문제없음"으로 영구 저장하게 된다."""
+
+    async def _boom(namespace, query, response):
+        raise AssertionError("실패 폴백을 캐시에 저장했다")
+
+    monkeypatch.setattr(llm_cache, "exact_set", _boom)
+
+    ranked = [_item("나이키 카드지갑", 14400, code="1")]
+    ctx = _FakeCallbackContext({"original_query": "나이키 에어포스1", "ranked_items": ranked})
+    asyncio.run(adk_pipeline._challenge_cache_store(ctx, _llm_response('{"verdicts": []}')))
+
+
+def test_challenge_cache_store_saves_real_verdicts(monkeypatch):
+    saved = {}
+
+    async def _exact_set(namespace, query, response):
+        saved["call"] = (namespace, query, response)
+
+    monkeypatch.setattr(llm_cache, "exact_set", _exact_set)
+
+    ranked = [_item("나이키 카드지갑", 14400, code="1")]
+    ctx = _FakeCallbackContext({"original_query": "나이키 에어포스1", "ranked_items": ranked})
+    asyncio.run(
+        adk_pipeline._challenge_cache_store(
+            ctx, _llm_response('{"verdicts": [{"index": 0, "verified": false, "note": "액세서리"}]}')
+        )
+    )
+
+    assert saved["call"][0] == adk_pipeline._CHALLENGE_CACHE_NAMESPACE
+    assert saved["call"][2] == {"verdicts": [{"index": 0, "verified": False, "note": "액세서리"}]}
+
+
+def test_judge_cache_store_skips_sentinel_index(monkeypatch):
+    """_on_judge_error가 합성한 index=-1 센티널은 캐시하면 안 된다."""
+
+    async def _boom(namespace, query, response):
+        raise AssertionError("판단 없음 센티널을 캐시에 저장했다")
+
+    monkeypatch.setattr(llm_cache, "exact_set", _boom)
+
+    ranked = [_item("나이키 에어포스1", 129000, code="1")]
+    ctx = _FakeCallbackContext({"original_query": "나이키 에어포스1", "ranked_items": ranked})
+    asyncio.run(adk_pipeline._judge_cache_store(ctx, _llm_response('{"index": -1, "reasoning": ""}')))
+
+
+def test_judge_cache_store_saves_real_pick(monkeypatch):
+    saved = {}
+
+    async def _exact_set(namespace, query, response):
+        saved["call"] = (namespace, query, response)
+
+    monkeypatch.setattr(llm_cache, "exact_set", _exact_set)
+
+    ranked = [_item("나이키 에어포스1", 129000, code="1")]
+    ctx = _FakeCallbackContext({"original_query": "나이키 에어포스1", "ranked_items": ranked})
+    asyncio.run(
+        adk_pipeline._judge_cache_store(ctx, _llm_response('{"index": 0, "reasoning": "가성비 좋음"}'))
+    )
+
+    assert saved["call"][0] == adk_pipeline._JUDGE_CACHE_NAMESPACE
+    assert saved["call"][2] == {"index": 0, "reasoning": "가성비 좋음"}
+
+
+def test_judge_cache_lookup_returns_cached_index_on_hit(monkeypatch):
+    async def _hit(namespace, query):
+        return {"index": 0, "reasoning": "가성비 좋음"}
+
+    monkeypatch.setattr(llm_cache, "exact_get", _hit)
+
+    ranked = [_item("나이키 에어포스1", 129000, code="1")]
+    ctx = _FakeCallbackContext({"original_query": "나이키 에어포스1", "ranked_items": ranked})
+    result = asyncio.run(adk_pipeline._judge_cache_lookup(ctx, llm_request=None))
+
+    assert result is not None
+    assert adk_pipeline._llm_response_text(result) == '{"index": 0, "reasoning": "가성비 좋음"}'
