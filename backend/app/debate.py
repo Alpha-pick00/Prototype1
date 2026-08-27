@@ -1227,3 +1227,5 @@ def _is_ambiguous_facets(query: str, facets: list[ClarifyFacet]) -> bool:
     """facet 중 하나라도 옵션이 2개 이상이고 아직 질의에 반영되지 않았으면
     사용자에게 물어볼 만큼 애매하다고 본다."""
     return any(len(f.options) > 1 and not _facet_resolved(query, f) for f in facets)
+
+

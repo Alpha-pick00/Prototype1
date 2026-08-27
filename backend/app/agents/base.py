@@ -335,4 +335,17 @@ def parse_json_object(text: str) -> dict:
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         raise ValueError(f"No JSON object found in response: {text[:200]!r}")
-    return json.loads(match.group(0))
+    raw = match.group(0)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # 2026-08-27 실측(candidate_notes, HCX-005) - 지시한 JSON 형식을
+        # 안 지키고 "price": 1,251,300 처럼 숫자 리터럴 안에 천단위 콤마를
+        # 그대로 남겨 JSON 문법 자체가 깨진 응답이 온 적이 있다. 숫자
+        # 사이의 콤마(값 구분자가 아니라 숫자 내부 콤마)만 골라 제거해
+        # 재시도한다 - 값 구분 콤마는 뒤에 공백/개행 다음 따옴표나 `{`가
+        # 오므로(`, "key"` 형태) 패턴에 안 걸린다.
+        repaired = re.sub(r"(?<=\d),(?=\d{3}\D)", "", raw)
+        if repaired == raw:
+            raise
+        return json.loads(repaired)

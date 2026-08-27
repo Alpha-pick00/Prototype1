@@ -189,6 +189,11 @@ async def decide(request: DecideRequest, background_tasks: BackgroundTasks) -> D
         # apply_challenge/judge)을 쓴다(2026-08-25 재구성) - 이 경로엔 애초에
         # 되묻기(clarify)가 없다. base_query가 있으면(AI 상세검색 드릴다운
         # 후속 턴) 재검색 대신 구조적 필터링으로 좁힌다.
+        #
+        # 2026-08-27, 사용자 요청("HCX로 정제해서 11번가 상위로 뜨는거
+        # 그대로 가져오면 되잖아") - filter_merge/challenge/judge 세 단계를
+        # "판단 없이 그대로 통과"시키는 raw 모드로 재구성했다(adk_pipeline.py
+        # 참고). 8단계 구조 자체는 그대로 유지한다.
         result = await adk_pipeline.run(
             request.query, base_query=request.base_query, facet_answers=request.facet_answers
         )
@@ -217,7 +222,7 @@ async def decide_stream(request: DecideRequest) -> StreamingResponse:
         result: DecideResponse | None = None
         try:
             # 메인 검색 흐름은 decide()와 같은 이유로 adk_pipeline.run_stream을
-            # 쓴다(위 decide() 주석 참고 - clarify 개념이 없다).
+            # 쓴다(위 decide() 주석 참고 - raw 모드도 그대로 적용됨).
             async for event in adk_pipeline.run_stream(
                 request.query, base_query=request.base_query, facet_answers=request.facet_answers
             ):

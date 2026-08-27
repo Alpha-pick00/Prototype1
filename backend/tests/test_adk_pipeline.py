@@ -86,59 +86,58 @@ def test_parse_challenge_result_returns_empty_dict_on_malformed_text():
     assert adk_pipeline._parse_challenge_result("이건 JSON이 아님") == {}
 
 
-def test_apply_challenge_verdicts_overlays_verified_and_note_by_index():
+def test_apply_challenge_verdicts_ignores_verdicts_in_raw_mode(monkeypatch):
+    """raw 모드(2026-08-27, 사용자 요청 - "판단 없이 그대로") - challenge
+    자체가 항상 스킵되므로 verdicts에 값이 들어와도 무시하고 _build_proposals
+    기본값(verified=True)을 그대로 반환한다."""
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
     ranked = [_item("A", 1000, code="1"), _item("B", 2000, code="2")]
     challenge_result = {"verdicts": [{"index": 1, "verified": False, "note": "다른 상품으로 의심됨"}]}
 
-    proposals = adk_pipeline._apply_challenge_verdicts(ranked, challenge_result)
+    proposals = asyncio.run(adk_pipeline._apply_challenge_verdicts(ranked, challenge_result))
 
-    assert proposals[0]["verified"] is True  # challenge가 안 건드린 index 0은 _build_proposals 기본값 유지
-    assert proposals[1]["verified"] is False
-    assert proposals[1]["challenge_note"] == "다른 상품으로 의심됨"
-
-
-def test_apply_challenge_verdicts_leaves_uncovered_candidates_untouched():
-    """challenge가 상위 N개만 다뤄서 verdicts에 없는 index는 _build_proposals의
-    기본 verified=True를 그대로 유지한다(검증 안 됨 != 검증 실패)."""
-    ranked = [_item("A", 1000, code="1")]
-    proposals = adk_pipeline._apply_challenge_verdicts(ranked, {"verdicts": []})
     assert proposals[0]["verified"] is True
-    assert proposals[0]["challenge_note"] is None
+    assert proposals[1]["verified"] is True
+    assert proposals[1]["challenge_note"] is None
 
 
-def test_apply_challenge_verdicts_rule_based_override_catches_accessory_challenge_missed(monkeypatch):
-    """2026-08-26, 사용자 리포트 - "1위에 휴대폰 뜨는데 2,3,4,5는 왜 저딴
-    액세서리가 떠". challenge(DeepSeek)가 "핸드백 케이스"처럼 상품명에
-    "케이스"가 그대로 있는 명백한 액세서리조차 verified=True로 통과시킨
-    사례를 실측으로 확인 - 규칙 기반 안전망이 challenge 판정과 무관하게
-    덮어써야 한다."""
+def test_apply_challenge_verdicts_does_not_flag_accessory_looking_names_in_raw_mode(monkeypatch):
+    """raw 모드에서는 상품명에 "케이스" 같은 액세서리 지시어가 있어도 규칙
+    기반으로 verified=False를 붙이지 않는다(2026-08-27, 사용자 요청 - "판단
+    없이 그대로 가져오면 되잖아")."""
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
     ranked = [_item("아이폰 17 mesh패턴 핸드백 케이스", 26600, code="1")]
-    challenge_result = {"verdicts": [{"index": 0, "verified": True, "note": ""}]}
-
-    proposals = adk_pipeline._apply_challenge_verdicts(ranked, challenge_result, query="아이폰 17")
-
-    assert proposals[0]["verified"] is False
-    assert "액세서리" in proposals[0]["challenge_note"]
-
-
-def test_apply_challenge_verdicts_rule_based_override_skipped_when_query_wants_accessory():
-    """"아이폰 케이스"를 검색했으면 케이스가 나오는 게 정상이므로 규칙 기반
-    안전망이 개입하면 안 된다."""
-    ranked = [_item("아이폰 17 실리콘 케이스", 9900, code="1")]
-    proposals = adk_pipeline._apply_challenge_verdicts(ranked, {"verdicts": []}, query="아이폰 케이스")
+    proposals = asyncio.run(adk_pipeline._apply_challenge_verdicts(ranked, {"verdicts": []}, query="아이폰 17"))
     assert proposals[0]["verified"] is True
 
 
-def test_apply_challenge_verdicts_does_not_override_when_challenge_already_flagged_false():
-    """challenge가 이미 False로 판정한 건 규칙 기반 note로 덮어쓰지 않고
-    challenge의 이유를 그대로 보존한다."""
-    ranked = [_item("아이폰 17 케이스", 9900, code="1")]
-    challenge_result = {"verdicts": [{"index": 0, "verified": False, "note": "본품이 아닌 액세서리"}]}
+def test_apply_challenge_verdicts_attaches_candidate_notes(monkeypatch):
+    """각 후보별 추천 이유(2026-08-27, 사용자 요청 - "각 후보군별로 추천
+    이유도 설명해줘 너가 reasoning 해서") - gpt.candidate_notes가 돌려준
+    문장이 index 순서 그대로 proposals의 reasoning에 반영된다. 순서
+    자체는 challenge_result와 무관하게 ranked 그대로 유지된다."""
 
-    proposals = adk_pipeline._apply_challenge_verdicts(ranked, challenge_result, query="아이폰 17")
+    async def _notes(query, candidates):
+        assert query == "나이키 에어포스1"
+        return {0: "가장 인기 있는 컬러입니다.", 1: "가성비가 좋습니다."}
 
-    assert proposals[0]["verified"] is False
-    assert proposals[0]["challenge_note"] == "본품이 아닌 액세서리"
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _notes)
+
+    ranked = [_item("나이키 에어포스1 화이트", 129000, code="1"), _item("나이키 에어포스1 블랙", 119000, code="2")]
+    proposals = asyncio.run(adk_pipeline._apply_challenge_verdicts(ranked, {"verdicts": []}, query="나이키 에어포스1"))
+
+    assert proposals[0]["reasoning"] == "가장 인기 있는 컬러입니다."
+    assert proposals[1]["reasoning"] == "가성비가 좋습니다."
 
 
 def test_candidates_with_verdicts_overlays_verified_from_proposals():
@@ -243,27 +242,6 @@ def test_build_challenge_prompt_includes_query_and_indexed_candidates():
     assert "129,000원" in prompt
 
 
-def test_all_proposals_unverified_true_when_every_proposal_verified_false():
-    proposals = [{"verified": False}, {"verified": False}]
-    assert adk_pipeline._all_proposals_unverified(proposals) is True
-
-
-def test_all_proposals_unverified_false_when_one_verified_true():
-    proposals = [{"verified": False}, {"verified": True}]
-    assert adk_pipeline._all_proposals_unverified(proposals) is False
-
-
-def test_all_proposals_unverified_false_when_unchecked():
-    """verified=None(challenge가 아예 안 다룬 후보, 검증 안 됨)은
-    verified=False(검증해봤는데 아니라고 판정됨)와 다르다 - 재시도 트리거가
-    아니다."""
-    assert adk_pipeline._all_proposals_unverified([{"verified": None}]) is False
-
-
-def test_all_proposals_unverified_false_for_empty_list():
-    assert adk_pipeline._all_proposals_unverified([]) is False
-
-
 # ---------------------------------------------------------------------------
 # run()/run_stream() 통합 - 실제 SequentialAgent 오케스트레이션을 그대로
 # 태우되, 네트워크가 필요한 지점만 몽키패치한다.
@@ -271,17 +249,10 @@ def test_all_proposals_unverified_false_for_empty_list():
 
 
 def test_run_stream_raises_runtime_error_when_no_relevant_candidates(monkeypatch):
-    async def _empty_search(query, base_query, facet_answers, force_price_rescue=False):
+    async def _empty_search(query, limit):
         return []
 
-    monkeypatch.setattr(adk_pipeline, "_search_candidates", _empty_search)
-
-    async def _empty_variants(query):
-        return []
-
-    from app.agents import hcx
-
-    monkeypatch.setattr(hcx, "generate_query_variants", _empty_variants)
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _empty_search)
 
     async def _collect():
         # 비대화체 질의라 looks_conversational_query가 False -> refine의
@@ -292,49 +263,57 @@ def test_run_stream_raises_runtime_error_when_no_relevant_candidates(monkeypatch
 
     assert events[0] == {"type": "status", "stage": "searching"}
     assert events[-1]["type"] == "error"
-    assert "관련성 있는 상품을 찾지 못했습니다" in events[-1]["message"]
+    assert "검색 결과를 찾지 못했습니다" in events[-1]["message"]
 
 
 def test_run_raises_runtime_error_when_no_relevant_candidates(monkeypatch):
-    async def _empty_search(query, base_query, facet_answers, force_price_rescue=False):
+    async def _empty_search(query, limit):
         return []
 
-    monkeypatch.setattr(adk_pipeline, "_search_candidates", _empty_search)
-
-    from app.agents import hcx
-
-    async def _empty_variants(query):
-        return []
-
-    monkeypatch.setattr(hcx, "generate_query_variants", _empty_variants)
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _empty_search)
 
     try:
         asyncio.run(adk_pipeline.run("존재하지않는이상한상품쿼리123"))
         raise AssertionError("RuntimeError가 발생해야 한다")
     except RuntimeError as exc:
-        assert "관련성 있는 상품을 찾지 못했습니다" in str(exc)
+        assert "검색 결과를 찾지 못했습니다" in str(exc)
 
 
-def test_run_skips_judge_llm_call_end_to_end_when_single_candidate(monkeypatch):
-    """관련성 필터를 통과한 후보가 1개면 judge LLM(Qwen)이 실제로 호출되지
-    않고 그 후보가 바로 최종 결정이 돼야 한다(2026-08-27, LLM 제거 가능
-    지점 분석). challenge/refine은 이 테스트의 관심사가 아니므로 관련성
-    필터를 통과하는 즉시 challenge 없이도 파이프라인이 끝까지 도는지만
-    본다 - conftest의 네트워크 차단(tests/conftest.py) 덕분에 judge가
-    실제로 호출됐다면 이 테스트는 NetworkBlockedError로 실패한다."""
-    single = [_item("나이키 에어포스1 정품", 129000, code="1")]
+def test_run_skips_challenge_and_judge_llm_calls_end_to_end(monkeypatch):
+    """raw 모드(2026-08-27, 사용자 요청 - "판단 없이 11번가 상위로 뜨는거
+    그대로 가져오면 되잖아") - challenge/judge LLM(DeepSeek/Qwen)이 실제로
+    호출되지 않고, 관련성 필터를 통과한 11번가 검색 결과 1위가 그대로 최종
+    결정이 돼야 한다(2026-08-27, 사용자 리포트 - "11번가에 아이폰 17
+    검색하면 핸드폰으로 매핑되는데 왜 API 통해서 하면 액세서리가 뜨는거야"
+    - 오픈 API의 sortCd="A"가 실제 웹사이트 랭킹과 달라 관련성 필터를
+    다시 붙였다). conftest의 네트워크 차단(tests/conftest.py) 덕분에
+    challenge/judge가 실제로 호출됐다면 이 테스트는 NetworkBlockedError로
+    실패한다."""
 
-    async def _single_search(query, base_query, facet_answers, force_price_rescue=False):
-        return single
+    async def _no_notes(query, candidates):
+        return {}
 
-    monkeypatch.setattr(adk_pipeline, "_search_candidates", _single_search)
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
+    items = [
+        _item("나이키 에어포스1 케이스", 9900, code="2"),
+        _item("나이키 에어포스1 정품", 129000, code="1"),
+    ]
+
+    async def _search(query, limit):
+        return items
+
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _search)
 
     result = asyncio.run(adk_pipeline.run("나이키 에어포스1 정품"))
 
+    # 관련성 필터가 "나이키 에어포스1 케이스"(부속품)를 걸러내, API가 1위로
+    # 준 것과 무관하게 진짜 본품("나이키 에어포스1 정품")만 남는다.
     assert result.decision.product_name == "나이키 에어포스1 정품"
-    assert "이것 하나뿐" in result.decision.reasoning
+    assert len(result.proposals) == 1
+    assert result.proposals[0].verified is True
     # 2026-08-27, 골든셋 실측 중 발견한 버그 회귀 방지 - Decision.verified가
-    # 항상 None으로 나오면 안 된다(challenge가 스킵/실패해도 Proposal 기본값은
+    # 항상 None으로 나오면 안 된다(challenge를 스킵해도 Proposal 기본값은
     # verified=True이므로 여기서도 True여야 한다).
     assert result.decision.verified is True
 
@@ -513,42 +492,21 @@ def test_judge_cache_lookup_returns_cached_index_on_hit(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # _skip_judge_if_single_candidate - 후보 1개면 LLM 호출 자체를 건너뛴다
-# (2026-08-27, LLM 제거 가능 지점 분석 - "여러 후보 중 고른다"는 judge의
-# 존재 이유가 후보 1개일 땐 성립하지 않는다).
+# (2026-08-27, 사용자 요청 - "판단 없이 11번가 상위로 뜨는거 그대로
+# 가져오면 되잖아". judge는 후보 개수나 challenge 결과와 무관하게 항상
+# index=0을 그대로 확정한다).
 # ---------------------------------------------------------------------------
 
 
-def test_skip_judge_returns_index_zero_when_single_candidate():
-    ranked = [_item("나이키 에어포스1", 129000, code="1")]
-    ctx = _FakeCallbackContext({"ranked_items": ranked, "proposals": []})
-
-    result = adk_pipeline._skip_judge_if_single_candidate(ctx, llm_request=None)
-
-    assert result is not None
-    parsed = adk_pipeline.parse_json_object(adk_pipeline._llm_response_text(result))
-    assert parsed["index"] == 0
-    assert parsed["reasoning"]
-
-
-def test_skip_judge_does_nothing_when_multiple_candidates():
+def test_skip_judge_always_returns_index_zero_regardless_of_candidate_count():
     ranked = [
         _item("나이키 에어포스1", 129000, code="1"),
         _item("나이키 에어포스1 화이트", 135000, code="2"),
     ]
     ctx = _FakeCallbackContext({"ranked_items": ranked, "proposals": []})
 
-    result = adk_pipeline._skip_judge_if_single_candidate(ctx, llm_request=None)
+    result = adk_pipeline._skip_judge_always(ctx, llm_request=None)
 
-    assert result is None
-
-
-def test_skip_judge_does_not_skip_when_single_candidate_failed_challenge():
-    """후보가 1개뿐이어도 challenge에서 verified=False로 나왔으면 judge가
-    "그래도 이걸 골랐다"는 맥락을 설명해야 하므로 스킵하지 않는다."""
-    ranked = [_item("골프파우치", 9900, code="1")]
-    proposals = [{"verified": False, "challenge_note": "본품이 아닌 파우치"}]
-    ctx = _FakeCallbackContext({"ranked_items": ranked, "proposals": proposals})
-
-    result = adk_pipeline._skip_judge_if_single_candidate(ctx, llm_request=None)
-
-    assert result is None
+    assert result is not None
+    parsed = adk_pipeline.parse_json_object(adk_pipeline._llm_response_text(result))
+    assert parsed["index"] == 0

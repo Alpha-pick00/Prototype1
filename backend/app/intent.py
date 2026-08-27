@@ -150,6 +150,19 @@ def _strip_match(query: str, match: re.Match) -> str:
     return re.sub(r"\s+", " ", stripped).strip()
 
 
+def _dae_unit(n: int) -> int:
+    """"N만원대"/"N천원대"의 "대"가 가리키는 폭을 N의 자릿수로 정한다
+    (2026-08-27, 사용자 리포트 "200만원대 컴퓨터 추천해줘"가 실패 -
+    옛 코드는 자릿수와 무관하게 항상 +9999원만 더해, "200만원대"가
+    200,000,000원~200,009,999원이라는 사실상 검색 불가능한 범위가 됐다).
+    "2만원대"는 2~2.9만원(자릿수 1 -> 1만원 폭), "20만원대"는 20~29만원
+    (자릿수 2 -> 10만원 폭), "200만원대"는 200~299만원(자릿수 3 -> 100만원
+    폭)처럼, "대" 앞 숫자의 마지막 자릿수 하나가 실제로 흔들리는 자리라는
+    한국어 관습을 그대로 따른다."""
+    digits = len(str(n))
+    return 10 ** (digits - 1)
+
+
 def extract_price_range(query: str) -> tuple[str, int | None, int | None]:
     """질의에서 가격 조건 표현을 찾아 (조건이 제거된 질의, 최소가 KRW,
     최대가 KRW)로 반환한다. 못 찾으면 (원래 질의 그대로, None, None) -
@@ -163,13 +176,17 @@ def extract_price_range(query: str) -> tuple[str, int | None, int | None]:
 
     match = _PRICE_MANWON_DAE_PATTERN.search(query)
     if match:
-        base = int(match.group(1)) * 10000
-        return _strip_match(query, match), base, base + 9999
+        n = int(match.group(1))
+        base = n * 10000
+        span = _dae_unit(n) * 10000
+        return _strip_match(query, match), base, base + span - 1
 
     match = _PRICE_CHEONWON_DAE_PATTERN.search(query)
     if match:
-        base = int(match.group(1)) * 1000
-        return _strip_match(query, match), base, base + 999
+        n = int(match.group(1))
+        base = n * 1000
+        span = _dae_unit(n) * 1000
+        return _strip_match(query, match), base, base + span - 1
 
     match = _PRICE_MANWON_MAX_PATTERN.search(query)
     if match:

@@ -68,19 +68,20 @@ from fetchers import elevenst
 
 from . import llm_cache
 from . import price_table as price_table_module
+from .agents import gpt
 from .agents.base import build_recommend_prompt, build_refine_query_prompt, parse_json_object
 from .config import settings
 from .debate import (
-    _apply_grade_mismatch_correction,
     _build_decision,
+    _build_price_miss_decision,
     _build_proposals,
-    _prioritize_exact_grade,
-    _rank_by_relevance,
+    _format_price_condition,
+    _price_distance,
+    _price_in_range,
     _refine_base_query,
     _search_candidates,
-    _search_with_query_variants,
 )
-from .intent import looks_conversational_query
+from .intent import extract_price_range, looks_conversational_query
 from .schemas import DecideResponse, RefinedQuery
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,15 @@ _APP_NAME = "alpha_pick_adk_pipeline"
 # _MAX_CANDIDATE_NOTES=5, 옛 파이프라인의 _MAX_EXTRACT_CANDIDATES=10과 같은
 # 원칙 - "상위 후보만 추가로 신경 쓴다").
 _MAX_CHALLENGE_CANDIDATES = 10
+
+# _FilterMergeNode의 관련성 필터 통과율 하한(2026-08-27, 사용자 확인) -
+# 실측으로 구체적 모델명 검색어(아이폰 17=50%, 갤럭시S25=77%)와 카테고리성
+# 검색어(노트북 추천=3%, 컴퓨터=0%) 사이 뚜렷한 격차를 확인했다. 다만
+# 정확한 모델명이어도 표기 차이(나이키 에어포스1=13%, "에어포스1"/"에어
+# 포스 1" 띄어쓰기 차이로 낮게 나옴 - 걸러진 것도 전부 진짜 관련상품)로
+# 낮게 나올 수 있어, 10%는 "카테고리성 검색어만 걸러내고 정밀도가 떨어지는
+# 정상 케이스는 건드리지 않는" 절충값이다.
+_CATEGORY_QUERY_MIN_MATCH_RATIO = 0.1
 
 # 2026-08-26 - 8단계 중 실제 LLM을 부르는 refine/challenge/judge에
 # app.llm_cache(기존 AI 상세검색 facet 추출이 쓰던 것과 같은 Supabase KV+
@@ -226,21 +236,78 @@ def _model_error_fallback_response(text: str) -> LlmResponse:
 
 
 class _ElevenstSearchNode(BaseAgent):
-    """2단계 search - 11번가 ProductSearch로 검색한다(`debate._search_candidates`
-    재사용, base_query/facet_answers 기반 드릴다운 로컬 필터링도 그대로 적용).
-    base_query는 refine 결과와 별개로 `_refine_base_query`로 일관되게 정제한다
-    (2026-08-25 회귀 수정과 같은 이유 - query만 정제되고 base_query가 안
-    맞으면 drilldown 필터가 유효 후보를 전부 걸러낸다)."""
+    """2단계 search - raw 모드(2026-08-27, 사용자 요청 - "HCX로 정제해서
+    11번가 상위로 뜨는거 그대로 가져오면 되잖아"). refine 결과(순수 검색어)로
+    11번가 웹사이트가 실제로 쓰는 랭킹을 그대로 가져온다.
+
+    웹 랭킹 API로 교체(2026-08-27, 사용자 리포트 - "11번가에 아이폰 17
+    검색하면 핸드폰으로 제대로 매핑되는데 API 통해서 하면 왜 액세서리가
+    뜨는거야" -> "로컬에서 웹사이트에서 먼저 추천도순 가져오고 API에서
+    매핑해주면 되잖아"). 실측 확인 - 공식 오픈 API(search_elevenst,
+    ProductSearch)의 sortCd="A"는 실제 11st.co.kr 웹사이트가 사람에게
+    보여주는 순위와 다른 알고리즘이라, 인기·고가 상품(아이폰/맥북 등)에서
+    액세서리가 상단을 차지하는 경우가 흔했다. `elevenst.
+    search_elevenst_web_ranking`이 웹사이트가 브라우저에서 직접 호출하는
+    비공식 내부 API를 그대로 호출해, 판단·보정 없이도 웹사이트와 동일한
+    순서(본품이 상단)를 받는다 - 그래서 sortCd=H 보정 재검색 같은 별도
+    장치가 필요 없다.
+
+    AI 상세검색 드릴다운(base_query/facet_answers)은 판단이 아니라
+    "사용자가 화면에서 명시적으로 고른 조건을 반영하는 것"이라 raw 모드
+    취지와 안 어긋난다(2026-08-27, 사용자 요청 - "AI 상세검색은 남겨놔야지") -
+    base_query가 있으면 `_search_candidates`(debate.py, 공식 오픈 API 기반)를
+    그대로 재사용해 넓게 검색한 뒤 사용자가 답한 facet 값으로 로컬
+    필터링한다 - facet 추출·필터링 로직이 공식 API의 필드(ReviewCount 등)에
+    맞춰져 있어 이 경로까지 웹 랭킹 API로 바꾸지는 않는다.
+
+    가격 표현 제거(extract_price_range)는 검색어 전처리와 조건 반영을
+    함께 한다 - "200만원대 컴퓨터"처럼 keyword에 가격 표현이 섞여 있으면
+    검색 자체가 실패한다(실측 확인, 2026-08-27). `_run_pipeline_once`가
+    refine 전에 이미 원본 질의에서 한 번 떼어(state의 price_min/max로
+    저장) refine이 짧고 단순한 텍스트만 다듬도록 했지만(비결정성 완화),
+    refine 결과에 표현이 다시 섞여 나올 수도 있으니 여기서도 한 번 더
+    떼어 병합한다 - 사용자가 명시한 가격대 조건을 지키는 것은 "무엇을
+    고를지 판단"이 아니라 "요청 사항을 반영"하는 것이라 raw 모드 취지와
+    어긋나지 않는다(AI 상세검색 드릴다운과 같은 성격, 2026-08-27 사용자
+    확인)."""
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         state = ctx.session.state
         original_query = state.get("original_query", "")
-        query = _resolved_query(state)
+        refined_query = _resolved_query(state)
+        # refine 재시도(2026-08-27, 사용자 리포트 - "노트북 추천해줘"/"아이폰
+        # 17을 진짜로 구매해보고 싶어졌어"가 정제 안 된 채로 그대로 검색어가
+        # 됨). refine 단계 모델(HCX-DASH-002)이 같은 입력을 직접 호출하면
+        # 매번 안정적으로 정제하는데, ADK LlmAgent 경로(시스템 프롬프트
+        # 지시문 + 별도 user 메시지로 같은 텍스트가 중복 전달되는 구조)
+        # 에서만 가끔 원문을 그대로(또는 {"error": null} 같은 지시 밖의
+        # 필드까지 섞어) 돌려주는 비결정성이 실측 확인됐다.
+        #
+        # 게이트는 looks_conversational_query(정규식 패턴)가 아니라 "refine
+        # 결과가 원본과 완전히 같은 문자열인지"로 잡는다 - 애초에
+        # looks_conversational_query가 이 refine 단계에 들어오는 조건
+        # 자체이므로(1단계의 before_model_callback), 원본과 같다는 것 자체가
+        # "패턴 어휘가 이 문장을 못 잡았는지 여부와 무관하게 정제가 전혀
+        # 안 됐다"는 확실한 신호다 - 특정 패턴을 새로 추가하는 것보다
+        # 근본적으로 견고하다. HCX를 다시 한번 호출해(gpt.refine_query -
+        # 직접 호출 경로라 이 문제가 재현되지 않았다) 정제를 시도하고,
+        # 그마저 실패하면(None) 원래 결과를 그대로 쓴다.
+        if refined_query and refined_query.strip() == original_query.strip():
+            retried = await gpt.refine_query(refined_query)
+            if retried:
+                refined_query = retried
+        query, price_min, price_max = extract_price_range(refined_query)
+        price_min = price_min if price_min is not None else state.get("price_min")
+        price_max = price_max if price_max is not None else state.get("price_max")
         base_query = await _refine_base_query(state.get("base_query"), original_query, query)
         facet_answers = state.get("facet_answers")
-        force_price_rescue = bool(state.get("force_price_rescue"))
 
-        items = await _search_candidates(query, base_query, facet_answers, force_price_rescue)
+        if base_query and base_query.strip() and base_query.strip() != query.strip():
+            items = await _search_candidates(query, base_query, facet_answers)
+        else:
+            items = await elevenst.search_elevenst_web_ranking(
+                query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT
+            )
 
         yield Event(
             author=self.name,
@@ -249,6 +316,8 @@ class _ElevenstSearchNode(BaseAgent):
                     "search_items": items,
                     "resolved_query": query,
                     "resolved_base_query": base_query,
+                    "price_min": price_min,
+                    "price_max": price_max,
                 }
             ),
         )
@@ -267,62 +336,78 @@ class _ElevenstProposeNode(BaseAgent):
 
 
 class _FilterMergeNode(BaseAgent):
-    """4단계 filter_merge - 관련성 필터(`_product_name_matches`) -> 0건이면
-    임베딩 의미 유사도 구제(`semantic_relevance_fallback`, facet_answers가
-    있을 때는 건너뜀 - 이미 구조적으로 필터링된 표본이라) -> 그래도 0건이면
-    HCX 표기 변형 재검색(`_search_with_query_variants`) -> 관련도순 임베딩
-    랭킹(`_rank_by_relevance`) 순서로 `debate.py`의
-    `_search_and_rank_candidates`와 동일한 로직을 그대로 재사용한다. 끝까지
-    관련 상품을 못 찾으면 RuntimeError를 그대로 던진다 - SequentialAgent는
-    서브 에이전트 예외를 그대로 전체 실패로 전파하고, `run()`/`run_stream()`의
-    바깥 try/except가 이를 "error" 이벤트로 옮긴다(옛 파이프라인과 동일한
-    전파 방식)."""
+    """4단계 filter_merge - raw 모드(2026-08-27, 사용자 요청 - "HCX로 정제해서
+    11번가 상위로 뜨는거 그대로 가져오면 되잖아, 판단 없이"). 등급 보정·
+    의심 후보 후순위화·challenge/judge 같은 판단 로직은 전부 없애고, search
+    단계가 가져온 검색 결과(웹 랭킹 API)를 사실상 그대로 통과시킨다.
+
+    단, 아래 두 가지는 다시 둔다 - 둘 다 "여러 후보 중 뭐가 나은지 판단"이
+    아니라 "질의/요청 조건에 안 맞는 걸 구조적으로 거르거나 반영"하는
+    것이라 raw 모드 취지와 어긋나지 않는다:
+
+    1. 관련성 필터(`_product_name_matches`, 2026-08-27, 사용자 리포트 -
+       "11번가에 아이폰 17 검색하면 핸드폰으로 제대로 매핑되는데 왜 API
+       통해서 하면 액세서리가 뜨는거야?") - "이 상품이 질의가 가리키는
+       상품과 같은 부류인지"(모델/수량 충돌, 본품 vs 부속품 구분)만
+       구조적으로 거른다. 이 함수는 원래 서로 다른 소스가 "같은 상품"인지
+       중복 판정하는 용도(fusion.dedup.NAME_SIMILARITY_THRESHOLD=85)라,
+       "노트북 추천"처럼 구체적 모델명이 없는 카테고리성 검색어에는 안
+       맞는다(실측 - "MSI 모던 16S..." 같은 상세 모델명과 문자열 유사도가
+       5점대로 나와 30개 중 29개가 걸러짐, 2026-08-27). 통과율이 낮으면
+       (_CATEGORY_QUERY_MIN_MATCH_RATIO 미만) 필터 자체가 이 질의에 안
+       맞는다고 보고 판단 개입 없이 원본을 그대로 쓴다 - 필터를 통과한
+       후보가 0건일 때(카테고리 검색어의 극단적인 경우)도 이 규칙 안에
+       포함된다.
+
+    2. 가격 범위 필터(_ElevenstSearchNode가 떼어낸 price_min/max,
+       2026-08-27, 사용자 리포트 - "200만원대 노트북"이 가격대와 무관한
+       결과를 줌) - 범위 안에 드는 후보가 있으면 그걸로 좁히고, 하나도
+       없으면 judge를 부르지 않고(_skip_judge_always와 별개로 여기서
+       미리) 가격이 가장 가까운 순으로 정렬해 price_miss_note를 남긴다 -
+       run_stream이 이를 보고 규칙 기반으로 안내한다."""
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         state = ctx.session.state
         query = state.get("resolved_query", "")
         facet_answers = state.get("facet_answers")
         items = state.get("candidates") or []
+        if not items:
+            raise RuntimeError(f"11번가에서 '{query}'에 대한 검색 결과를 찾지 못했습니다.")
+        # facet_answers가 있으면 search 단계(_search_candidates)가 이미 사용자가
+        # 고른 조건으로 구조적 필터링을 해둔 상태다 - 여기서 원래 질의 문자열
+        # 기준 유사도 필터를 또 걸면(드릴다운 질의는 짧은 값 하나만 남는 경우가
+        # 많아) 방금 필터링한 후보까지 이중으로 걸러낼 수 있어 건너뛴다.
+        if facet_answers:
+            ranked = items
+        else:
+            relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
+            match_ratio = len(relevant) / len(items)
+            ranked = items if match_ratio < _CATEGORY_QUERY_MIN_MATCH_RATIO else relevant
 
-        relevant = (
-            items
-            if facet_answers
-            else [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
-        )
-        if not relevant and not facet_answers:
-            relevant = await price_table_module.semantic_relevance_fallback(query, items)
-        if not relevant:
-            relevant = await _search_with_query_variants(query)
-        if not relevant:
-            raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다.")
+        price_min = state.get("price_min")
+        price_max = state.get("price_max")
+        if price_min is not None or price_max is not None:
+            in_range = [it for it in ranked if _price_in_range(it["price_krw"], price_min, price_max)]
+            if in_range:
+                ranked = in_range
+            else:
+                price_miss_note = _format_price_condition(price_min, price_max)
+                ranked = sorted(ranked, key=lambda it: _price_distance(it["price_krw"], price_min, price_max))
+                yield Event(
+                    author=self.name,
+                    actions=EventActions(
+                        state_delta={
+                            "ranked_items": ranked,
+                            "excluded_grade_tokens": [],
+                            "price_miss_note": price_miss_note,
+                        }
+                    ),
+                )
+                return
 
-        # 2026-08-26, 사용자 리포트("아이폰 17이나 16으로 검색할 때 왜 프로나
-        # 프로맥스만 매핑이 되는거야") - debate.py._search_and_rank_candidates와
-        # 동일한 로직/헬퍼 재사용(_apply_grade_mismatch_correction/
-        # _prioritize_exact_grade 참고 - 임베딩 코사인 유사도만으로는 등급
-        # 차이가 랭킹에 반영 안 됨을 실측 확인).
-        excluded_grade_tokens: list[str] = []
-        if not facet_answers:
-            items, excluded_grade_tokens = await _apply_grade_mismatch_correction(query, items, relevant)
-            if excluded_grade_tokens:
-                relevant = [
-                    it for it in items if price_table_module._product_name_matches(query, it["product_name"])
-                ]
-
-        ranked = await _rank_by_relevance(query, relevant)
-        ranked = _prioritize_exact_grade(ranked, excluded_grade_tokens)
-        # 2026-08-25 사용자 리포트("왜 200만원 넘는걸 추천한거지? 리뷰도 없고?")
-        # 대응 - 의심스러운(중앙값 대비 파격 저가·"미개봉"/"완납" 문구) 후보를
-        # 뒤로 미룬다. 프롬프트 경고 문구만으로는(agents/base.py) HCX-005가
-        # 반복 무시하고 순수 최저가만 골라(같은 요청 2회 재현) 코드로 순서
-        # 자체를 정해준다 - debate.py._search_and_rank_candidates와 동일한
-        # 위치(관련도 랭킹 직후, recommend/judge 단계 전)에 적용한다.
-        ranked = price_table_module.deprioritize_suspicious(ranked, excluded_grade_tokens)
         yield Event(
             author=self.name,
-            actions=EventActions(
-                state_delta={"ranked_items": ranked, "excluded_grade_tokens": excluded_grade_tokens}
-            ),
+            actions=EventActions(state_delta={"ranked_items": ranked, "excluded_grade_tokens": []}),
         )
 
 
@@ -376,47 +461,23 @@ def _parse_challenge_result(raw: Any) -> dict:
         return {}
 
 
-def _apply_challenge_verdicts(
+async def _apply_challenge_verdicts(
     ranked: list[elevenst.ElevenstSearchItem], challenge_result: dict, query: str = ""
 ) -> list[dict]:
-    """7단계 apply_challenge의 핵심 로직(순수 함수) - challenge(DeepSeek)
-    검증 결과를 `_build_proposals`가 만든 Proposal 목록(기본값 verified=True)에
-    index 기준으로 덧씌운다(`verified`/`challenge_note`).
+    """7단계 apply_challenge - raw 모드(2026-08-27, 사용자 요청 - "판단 없이
+    그대로 가져오면 되잖아"). challenge 자체가 스킵되므로(challenge_result는
+    항상 빈 verdicts) 순서·선택에 영향을 주는 재판정은 하지 않고
+    `_build_proposals`(기본값 verified=True)를 그대로 쓴다 - 상품명에
+    "케이스"가 있어도 걸러내거나 순서를 바꾸지 않는다.
 
-    규칙 기반 안전망(2026-08-26, 사용자 리포트 - "1위에 휴대폰 뜨는데 2,3,4,5는
-    왜 저딴 액세서리가 떠") - challenge가 "아이폰 17 mesh패턴 핸드백 케이스"
-    처럼 상품명에 "케이스"가 그대로 박혀있는 명백한 액세서리조차
-    verified=True로 통과시킨 사례를 실측으로 확인했다(LLM이 프롬프트의
-    "판단이 애매하면 true로 두세요"를 과하게 적용한 것으로 보임 - 매 호출
-    같은 실수를 반복한다는 보장이 없어 재시도로 고쳐질 문제가 아니다).
-    challenge 판정과 무관하게, 상품명이 액세서리 지시어를 달고 있는데 질의
-    자체는 액세서리를 찾는 게 아니면(price_table._looks_like_accessory,
-    이미 검색 보정 트리거로 검증된 판정 로직 재사용) verified=False로 강제
-    덮어쓴다 - LLM이 놓쳐도 최소한 이 명백한 경우는 규칙으로 잡는다."""
-    verdicts_by_index = {v["index"]: v for v in challenge_result.get("verdicts") or []}
-    query_wants_accessory = price_table_module._looks_like_accessory(query)
-
-    proposals = _build_proposals(ranked, {})
-    updated = []
-    for i, proposal in enumerate(proposals):
-        verdict = verdicts_by_index.get(i)
-        if verdict is not None:
-            proposal = proposal.model_copy(
-                update={"verified": verdict["verified"], "challenge_note": verdict.get("note") or None}
-            )
-        if (
-            proposal.verified is not False
-            and not query_wants_accessory
-            and price_table_module._looks_like_accessory(proposal.product_name)
-        ):
-            proposal = proposal.model_copy(
-                update={
-                    "verified": False,
-                    "challenge_note": "액세서리로 보이는 상품명(케이스/충전기 등)이라 규칙 기반으로 걸러짐",
-                }
-            )
-        updated.append(proposal)
-    return [p.model_dump() for p in updated]
+    각 후보별 추천 이유(2026-08-27, 사용자 요청 - "각 후보군별로 추천 이유도
+    설명해줘 너가 reasoning 해서") - gpt.candidate_notes(HCX)가 상위 후보
+    (_MAX_CANDIDATE_NOTES개)마다 1문장 이유를 붙인다. 이건 순서를 바꾸는
+    "판단"이 아니라 이미 정해진 순서에 대한 "설명"이라 raw 모드 취지와
+    안 어긋난다 - 실패해도(키 없음·API 오류) candidate_notes가 빈 dict를
+    돌려줘 _build_proposals의 기본 문구로 안전하게 대체된다."""
+    notes = await gpt.candidate_notes(query, ranked)
+    return [p.model_dump() for p in _build_proposals(ranked, notes)]
 
 
 class _ApplyChallengeNode(BaseAgent):
@@ -427,7 +488,7 @@ class _ApplyChallengeNode(BaseAgent):
         ranked = ctx.session.state.get("ranked_items") or []
         challenge_result = _parse_challenge_result(ctx.session.state.get("challenge_result"))
         query = _resolved_query(ctx.session.state)
-        proposals = _apply_challenge_verdicts(ranked, challenge_result, query)
+        proposals = await _apply_challenge_verdicts(ranked, challenge_result, query)
         yield Event(author=self.name, actions=EventActions(state_delta={"proposals": proposals}))
 
 
@@ -550,6 +611,15 @@ async def _challenge_cache_store(callback_context, llm_response: LlmResponse) ->
     await llm_cache.exact_set(_CHALLENGE_CACHE_NAMESPACE, key, parsed)
 
 
+def _skip_challenge_always(callback_context, llm_request) -> LlmResponse | None:
+    """6단계 challenge - raw 모드(2026-08-27, 사용자 요청 - "판단 없이 11번가
+    상위로 뜨는거 그대로 가져오면 되잖아"). 의미 재검증 자체가 "판단"이므로
+    LLM을 아예 호출하지 않고 항상 verdicts 빈 리스트를 흘려보낸다 - 뒤의
+    apply_challenge/judge도 이 빈 결과를 받아 그대로 통과시킨다."""
+    fallback = _ChallengeResult(verdicts=[])
+    return _model_error_fallback_response(fallback.model_dump_json())
+
+
 def _build_challenge_agent() -> LlmAgent:
     def instruction(ctx: ReadonlyContext) -> str:
         query = _resolved_query(ctx.state)
@@ -569,7 +639,7 @@ def _build_challenge_agent() -> LlmAgent:
         ),
         instruction=instruction,
         output_key="challenge_result",
-        before_model_callback=_challenge_cache_lookup,
+        before_model_callback=[_skip_challenge_always],
         after_model_callback=_challenge_cache_store,
         on_model_error_callback=_on_challenge_error,
     )
@@ -583,20 +653,12 @@ def _on_judge_error(callback_context, llm_request, error) -> LlmResponse | None:
     return _model_error_fallback_response(_JudgeVerdict(index=-1, reasoning="").model_dump_json())
 
 
-def _skip_judge_if_single_candidate(callback_context, llm_request) -> LlmResponse | None:
-    """8단계 judge - 관련성 필터를 통과한 후보가 정확히 1개면 고를 대상
-    자체가 없으므로 LLM 호출 없이 그 후보를 바로 확정한다(2026-08-27,
-    LLM 제거 가능 지점 분석 - "여러 후보 중 가장 나은 것을 고른다"는 judge의
-    존재 이유가 후보가 1개일 때는 성립하지 않는다). 단, 그 후보가 challenge
-    에서 verified=False로 나왔으면 스킵하지 않는다 - 이 경우 judge가
-    reasoning에서 "검증 실패했지만 다른 후보가 없어 이걸 골랐다"는 맥락을
-    설명해야 하는데, 그건 여전히 LLM 판단이 필요한 영역이다."""
-    candidates = _candidates_with_verdicts(callback_context.state)
-    if len(candidates) != 1:
-        return None
-    if candidates[0].get("verified") is False:
-        return None
-    fallback = _JudgeVerdict(index=0, reasoning="관련성 검증을 통과한 후보가 이것 하나뿐이라 선택")
+def _skip_judge_always(callback_context, llm_request) -> LlmResponse | None:
+    """8단계 judge - raw 모드(2026-08-27, 사용자 요청 - "판단 없이 11번가
+    상위로 뜨는거 그대로 가져오면 되잖아"). "여러 후보 중 가장 나은 걸
+    고른다"는 판단 자체를 하지 않고, 검색 결과 1위(index=0, 11번가
+    ProductSearch가 추천도순으로 준 그대로)를 항상 그대로 확정한다."""
+    fallback = _JudgeVerdict(index=0, reasoning="")
     return _model_error_fallback_response(fallback.model_dump_json())
 
 
@@ -662,7 +724,7 @@ def _build_judge_agent() -> LlmAgent:
         instruction=instruction,
         output_schema=_JudgeVerdict,
         output_key="judge_result",
-        before_model_callback=[_skip_judge_if_single_candidate, _judge_cache_lookup],
+        before_model_callback=[_skip_judge_always],
         after_model_callback=_judge_cache_store,
         on_model_error_callback=_on_judge_error,
     )
@@ -737,7 +799,18 @@ async def _run_pipeline_once(
 ) -> tuple[dict | None, str | None]:
     """파이프라인을 끝까지 한 번 돌리고 (최종 세션 state, 실패 메시지)를
     돌려준다 - 실패면 (None, 메시지), 성공이면 (state, None). run_stream이
-    최초 1회 + 필요시 가격 보정 재시도 1회, 최대 2번 이 함수를 부른다."""
+    최초 1회 + 필요시 가격 보정 재시도 1회, 최대 2번 이 함수를 부른다.
+
+    가격 표현은 refine(HCX) 전에 뗀다(2026-08-27, 사용자 리포트 -
+    "200만원대 노트북 추천해줘"가 가격대와 무관한 액세서리를 줌 -> 원인은
+    refine이 "200만원대"라는 어려운 표현까지 포함된 원문을 한 번에
+    다듬으려다 비결정적으로 실패했기 때문이었다: 실측 시 "노트북 추천"
+    으로 잘 나올 때도, "노트북"만 남기고 가격 조건 자체를 삭제할 때도
+    있었다). `debate._search_and_rank_candidates`(레거시 경로)도 같은
+    순서(가격 먼저 분리 -> 그 다음 정제)를 쓴다 - "200만원대"가 빠진
+    "노트북 추천해줘"만 refine에 넘기면 짧고 단순해 훨씬 안정적으로
+    다듬어진다."""
+    query, price_min, price_max = extract_price_range(query)
     runner = _get_runner()
     session_id = str(uuid.uuid4())
     await runner.session_service.create_session(
@@ -749,6 +822,8 @@ async def _run_pipeline_once(
             "base_query": base_query,
             "facet_answers": facet_answers,
             "force_price_rescue": force_price_rescue,
+            "price_min": price_min,
+            "price_max": price_max,
         },
     )
 
@@ -772,17 +847,6 @@ async def _run_pipeline_once(
     return (dict(final_session.state) if final_session else {}), None
 
 
-def _all_proposals_unverified(proposals: list[dict]) -> bool:
-    """challenge(DeepSeek)가 상위 후보를 전부 verified=False로 판정했는지 -
-    `_search_candidates`의 로컬 액세서리 단어 트리거(price_table.
-    most_candidates_look_like_accessories)가 놓친 케이스를 잡는 두 번째
-    안전망이다. 단어 목록은 카테고리 커버리지가 늘 부족한데(2026-08-26
-    실측 - "에반게리온 아이폰 케이스"의 "주변기기"가 목록에 없어 트리거를
-    못 태웠다), 이건 의미 기반(DeepSeek) 판정 결과만 보므로 그 한계가
-    없다."""
-    return bool(proposals) and all(p.get("verified") is False for p in proposals)
-
-
 async def run_stream(
     query: str, base_query: str | None = None, facet_answers: dict[str, list[str]] | None = None
 ) -> AsyncIterator[dict[str, Any]]:
@@ -790,23 +854,17 @@ async def run_stream(
     같은 이벤트 계약(status/final/error)을 유지한다 - 프론트는 그대로
     동작한다.
 
-    challenge가 상위 후보를 전부 verified=False로 판정하면(2026-08-26)
-    sortCd="H" 보정 검색을 강제로 켠 채 파이프라인을 한 번만 더 돌린다 -
-    무한 재시도를 막기 위해 최대 1회. 재시도가 또 실패하거나 후보를 못
-    찾으면 첫 시도 결과를 그대로 쓴다(둘 다 나쁘면 최소한 처음 것이라도
-    사용자에게 보여준다)."""
+    raw 모드(2026-08-27, 사용자 요청 - "판단 없이 11번가 상위로 뜨는거
+    그대로 가져오면 되잖아") - HCX 정제(refine) -> 11번가 검색(search,
+    sortCd="A") -> 그 순서 그대로(filter_merge/challenge/judge 전부 판단
+    없이 통과) 1위를 최종 추천으로 확정한다. 재검색·재시도 로직은 이미
+    "결과를 보고 판단해서 다시 시도한다"는 개입이므로 두지 않는다 - 검색이
+    빈 결과면 그대로 에러다."""
     yield {"type": "status", "stage": "searching"}
 
     state, pipeline_failed_message = await _run_pipeline_once(
         query, base_query, facet_answers, force_price_rescue=False
     )
-
-    if state is not None and _all_proposals_unverified(state.get("proposals") or []):
-        rescued_state, rescued_error = await _run_pipeline_once(
-            query, base_query, facet_answers, force_price_rescue=True
-        )
-        if rescued_error is None and rescued_state.get("ranked_items") and rescued_state.get("proposals"):
-            state, pipeline_failed_message = rescued_state, None
 
     if pipeline_failed_message is not None:
         yield {"type": "error", "message": pipeline_failed_message}
@@ -818,10 +876,22 @@ async def run_stream(
         yield {"type": "error", "message": f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다."}
         return
 
-    recommended = _judge_recommended(state)
-    decision = _build_decision(
-        ranked, recommended, model_label="Qwen", verified=_judge_recommended_verified(state, recommended)
-    )
+    # 가격 조건에 맞는 후보가 하나도 없었던 경우(2026-08-27, filter_merge가
+    # price_miss_note를 남김) - "가장 나은 걸 고른다"는 judge의 판단 자체가
+    # 성립하지 않으므로, 가격 최근접순 1위(ranked[0])를 규칙 기반으로
+    # 안내한다.
+    price_miss_note = state.get("price_miss_note")
+    if price_miss_note:
+        decision = _build_price_miss_decision(ranked, price_miss_note)
+    else:
+        # raw 모드(2026-08-27) - judge를 항상 스킵하므로(_skip_judge_always)
+        # judge_result는 언제나 index=0(11번가가 준 1위)이고, verified는
+        # challenge를 스킵해 항상 None이다. `_build_decision`은 이 값을 그대로
+        # 받아 판단 없이 후보 1위를 decision으로 확정한다.
+        recommended = _judge_recommended(state)
+        decision = _build_decision(
+            ranked, recommended, model_label="elevenst", verified=_judge_recommended_verified(state, recommended)
+        )
     result = DecideResponse(
         query=state.get("resolved_query", query),
         proposals=proposals_raw,

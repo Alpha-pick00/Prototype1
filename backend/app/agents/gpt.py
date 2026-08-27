@@ -1,3 +1,6 @@
+import json
+import re
+
 from openai import AsyncOpenAI
 
 from ..config import settings
@@ -139,17 +142,132 @@ async def candidate_notes(query: str, candidates: list[dict]) -> dict[int, str]:
         client = _client()
         response = await client.chat.completions.create(
             model=settings.hcx_recommend_model,
+            temperature=0,
             messages=[{"role": "user", "content": build_candidate_notes_prompt(query, candidates, note_indices)}],
         )
-        data = parse_json_object(response.choices[0].message.content or "")
-        notes: dict[int, str] = {}
-        for key, value in (data.get("notes") or {}).items():
+        text = response.choices[0].message.content or ""
+        notes = _parse_candidate_notes(text, candidates)
+        return notes
+    except Exception:
+        return {}
+
+
+_REASON_KEYS = ("reason", "note", "이유", "설명")
+_NAME_KEYS = ("name", "product_name", "title", "상품명")
+_INDEX_KEYS = ("index", "후보", "candidate", "idx")
+_INDEX_IN_BRACKETS_RE = re.compile(r"\d+")
+
+
+def _extract_json_value(text: str) -> object | None:
+    """text 안에서 JSON 값(객체 또는 배열)을 최대한 관대하게 뽑아낸다 -
+    먼저 최상위가 배열인지({...} 앞에 [가 먼저 나오는지)로 배열/객체를
+    구분하고, 실패하면 숫자 내 콤마(2026-08-27 실측 - "price": 1,251,300
+    처럼 HCX가 JSON 문법을 깨뜨린 사례) 등 흔한 오류를 복구해 재시도한다."""
+    stripped = text.strip()
+    obj_start = stripped.find("{")
+    arr_start = stripped.find("[")
+    if arr_start != -1 and (obj_start == -1 or arr_start < obj_start):
+        match = re.search(r"\[.*\]", stripped, re.DOTALL)
+    else:
+        match = re.search(r"\{.*\}", stripped, re.DOTALL)
+    if not match:
+        return None
+    raw = match.group(0)
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        repaired = re.sub(r"(?<=\d),(?=\d{3}\D)", "", raw)
+        try:
+            return json.loads(repaired)
+        except (ValueError, TypeError):
+            return None
+
+
+def _find_reason_for_name(value: object, name: str) -> str | None:
+    """파싱된 JSON 구조를 재귀적으로 훑어, 후보 상품명(name)과 정확히
+    일치하는 key 옆의 문자열 값이나, "reason"류 필드가 붙어있는 객체를
+    찾아 이유 문자열을 돌려준다."""
+    if isinstance(value, dict):
+        for key, val in value.items():
+            if key == name and isinstance(val, str) and val.strip():
+                return val.strip()
+            if key in _NAME_KEYS and isinstance(val, str) and val.strip() == name:
+                for reason_key in _REASON_KEYS:
+                    reason = value.get(reason_key)
+                    if isinstance(reason, str) and reason.strip():
+                        return reason.strip()
+        for val in value.values():
+            found = _find_reason_for_name(val, name)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_reason_for_name(item, name)
+            if found:
+                return found
+    return None
+
+
+def _index_and_reason_from_item(item: dict) -> tuple[int, str] | None:
+    """리스트 항목 하나에서 (index, reason)을 뽑는다 - 인덱스 필드값이
+    "[0]"처럼 대괄호로 감싸져 오는 경우(2026-08-27 실측, HCX가 "후보":
+    "[0]" 형태로 응답)까지 포함해 첫 번째 숫자를 index로 쓴다."""
+    index_val = next((item[k] for k in _INDEX_KEYS if k in item), None)
+    if index_val is None:
+        return None
+    match = _INDEX_IN_BRACKETS_RE.search(str(index_val))
+    if not match:
+        return None
+    index = int(match.group(0))
+    reason = next((item[k] for k in _REASON_KEYS if k in item), None)
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    return index, reason.strip()
+
+
+def _parse_candidate_notes(text: str, candidates: list[dict]) -> dict[int, str]:
+    """지시한 형식({"notes": {"0": "...", ...}})을 우선 시도한다 - index
+    기반이라 상품명 매칭 없이 그대로 후보에 대응시킬 수 있어 가장
+    신뢰도가 높다. HCX가 형식을 안 지키는 경우(2026-08-27 실측으로 여러
+    다른 변형을 확인했다 - 리스트+name/reason 필드, 최상위 {"상품명":
+    "이유문장"} dict, 리스트+{"후보": "[0]", "설명": "..."} 등)를 대비해
+    두 단계 폴백을 쓴다: (1) 리스트 항목이 인덱스+이유 필드 쌍으로
+    보이면 그대로 매핑, (2) 그마저 안 맞으면 파싱된 JSON 구조를 재귀
+    탐색해 후보 상품명과 일치하는 이유를 찾는다 - 매번 새로 나오는
+    변형마다 개별 분기를 추가하는 대신, "어떤 구조든 인덱스나 상품명
+    근처에 이유 문자열이 있을 것"이라는 더 느슨하지만 견고한 가정으로
+    대응한다."""
+    data = _extract_json_value(text)
+    notes: dict[int, str] = {}
+    if isinstance(data, dict) and isinstance(data.get("notes"), dict):
+        for key, value in data["notes"].items():
             try:
                 index = int(key)
             except (TypeError, ValueError):
                 continue
             if 0 <= index < len(candidates) and value:
                 notes[index] = str(value).strip()
+        if notes:
+            return notes
+
+    if data is None:
         return notes
-    except Exception:
-        return {}
+
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            result = _index_and_reason_from_item(item)
+            if result is None:
+                continue
+            index, reason = result
+            if 0 <= index < len(candidates):
+                notes[index] = reason
+        if notes:
+            return notes
+
+    for index, candidate in enumerate(candidates):
+        reason = _find_reason_for_name(data, candidate["product_name"])
+        if reason:
+            notes[index] = reason
+    return notes
