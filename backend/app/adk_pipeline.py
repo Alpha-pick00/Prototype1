@@ -38,6 +38,13 @@ refine/challenge/judge(실제 LLM을 부르는 3단계) 모두 `app.llm_cache`
 verdict/판단을 새 후보에 잘못 재사용하게 되기 때문이다. on_model_error_
 callback의 폴백 응답(빈 verdicts/index=-1)은 캐시하지 않는다 - API 실패를
 캐시해버리면 다음 동일 요청도 영원히 실패한 것처럼 처리된다.
+
+judge는 관련성 필터를 통과한 후보가 정확히 1개면 LLM 호출 자체를 건너뛴다
+(2026-08-27, LLM 제거 가능 지점 분석 - `_skip_judge_if_single_candidate`).
+"여러 후보 중 고른다"는 judge의 존재 이유가 후보 1개일 땐 성립하지 않는다 -
+단, 그 후보가 challenge에서 verified=False로 나왔으면 스킵하지 않는다
+(judge가 왜 검증 실패한 후보를 골랐는지 설명하는 reasoning은 여전히 LLM
+판단 영역).
 """
 
 from __future__ import annotations
@@ -576,6 +583,23 @@ def _on_judge_error(callback_context, llm_request, error) -> LlmResponse | None:
     return _model_error_fallback_response(_JudgeVerdict(index=-1, reasoning="").model_dump_json())
 
 
+def _skip_judge_if_single_candidate(callback_context, llm_request) -> LlmResponse | None:
+    """8단계 judge - 관련성 필터를 통과한 후보가 정확히 1개면 고를 대상
+    자체가 없으므로 LLM 호출 없이 그 후보를 바로 확정한다(2026-08-27,
+    LLM 제거 가능 지점 분석 - "여러 후보 중 가장 나은 것을 고른다"는 judge의
+    존재 이유가 후보가 1개일 때는 성립하지 않는다). 단, 그 후보가 challenge
+    에서 verified=False로 나왔으면 스킵하지 않는다 - 이 경우 judge가
+    reasoning에서 "검증 실패했지만 다른 후보가 없어 이걸 골랐다"는 맥락을
+    설명해야 하는데, 그건 여전히 LLM 판단이 필요한 영역이다."""
+    candidates = _candidates_with_verdicts(callback_context.state)
+    if len(candidates) != 1:
+        return None
+    if candidates[0].get("verified") is False:
+        return None
+    fallback = _JudgeVerdict(index=0, reasoning="관련성 검증을 통과한 후보가 이것 하나뿐이라 선택")
+    return _model_error_fallback_response(fallback.model_dump_json())
+
+
 def _judge_cache_key_extra(state: dict) -> str:
     """judge 캐시 키에 excluded_grade_tokens를 반영한다(2026-08-26 실측 -
     프롬프트에 "[다른 등급]" 표시를 추가하기 전 저장된 캐시가 그대로
@@ -638,7 +662,7 @@ def _build_judge_agent() -> LlmAgent:
         instruction=instruction,
         output_schema=_JudgeVerdict,
         output_key="judge_result",
-        before_model_callback=_judge_cache_lookup,
+        before_model_callback=[_skip_judge_if_single_candidate, _judge_cache_lookup],
         after_model_callback=_judge_cache_store,
         on_model_error_callback=_on_judge_error,
     )
@@ -686,6 +710,23 @@ def _judge_recommended(state: dict) -> tuple[int, str] | None:
     if not (0 <= index < len(ranked)):
         return None
     return index, str(judge_result.get("reasoning") or "").strip()
+
+
+def _judge_recommended_verified(state: dict, recommended: tuple[int, str] | None) -> bool | None:
+    """judge가 실제로 고른 후보(recommended의 index)의 challenge verified
+    값을 돌려준다(2026-08-27, 골든셋 실측 중 발견 - `_build_decision`이
+    verified 인자 자체를 안 받아 schemas.Decision.verified가 문서와 달리
+    항상 None으로 나오던 버그). judge가 실패했거나(recommended is None,
+    최저가 폴백으로 이어짐) index가 proposals 범위 밖이면 None - 폴백
+    선택은 challenge 검증 대상이 아니었으므로 애초에 verified를 판단할
+    근거가 없다."""
+    if recommended is None:
+        return None
+    index, _ = recommended
+    proposals = state.get("proposals") or []
+    if not (0 <= index < len(proposals)):
+        return None
+    return proposals[index].get("verified")
 
 
 async def _run_pipeline_once(
@@ -777,7 +818,10 @@ async def run_stream(
         yield {"type": "error", "message": f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다."}
         return
 
-    decision = _build_decision(ranked, _judge_recommended(state), model_label="Qwen")
+    recommended = _judge_recommended(state)
+    decision = _build_decision(
+        ranked, recommended, model_label="Qwen", verified=_judge_recommended_verified(state, recommended)
+    )
     result = DecideResponse(
         query=state.get("resolved_query", query),
         proposals=proposals_raw,

@@ -211,6 +211,31 @@ def test_judge_recommended_returns_index_and_reasoning_when_valid():
     assert adk_pipeline._judge_recommended(state) == (0, "가성비 좋음")
 
 
+# ---------------------------------------------------------------------------
+# _judge_recommended_verified - Decision.verified가 항상 None으로 나오던
+# 버그 수정(2026-08-27, 골든셋 50개 실측 중 발견 - schemas.Decision.verified
+# docstring은 "challenge가 필요 없는 경우도 True로 강제되므로 None에는 안
+# 걸림"이라고 명시하는데, _build_decision이 verified 인자 자체를 안 받아
+# 실제로는 골든셋 43건 전량이 None으로 나왔다).
+# ---------------------------------------------------------------------------
+
+
+def test_judge_recommended_verified_returns_challenge_verdict_for_chosen_index():
+    state = {"proposals": [{"verified": True}, {"verified": False}]}
+    assert adk_pipeline._judge_recommended_verified(state, (1, "이유")) is False
+    assert adk_pipeline._judge_recommended_verified(state, (0, "이유")) is True
+
+
+def test_judge_recommended_verified_returns_none_when_judge_failed():
+    state = {"proposals": [{"verified": True}]}
+    assert adk_pipeline._judge_recommended_verified(state, None) is None
+
+
+def test_judge_recommended_verified_returns_none_when_index_out_of_range():
+    state = {"proposals": [{"verified": True}]}
+    assert adk_pipeline._judge_recommended_verified(state, (5, "이유")) is None
+
+
 def test_build_challenge_prompt_includes_query_and_indexed_candidates():
     prompt = adk_pipeline._build_challenge_prompt("나이키", [_item("나이키 에어포스1", 129000, code="1")])
     assert "나이키" in prompt
@@ -288,6 +313,30 @@ def test_run_raises_runtime_error_when_no_relevant_candidates(monkeypatch):
         raise AssertionError("RuntimeError가 발생해야 한다")
     except RuntimeError as exc:
         assert "관련성 있는 상품을 찾지 못했습니다" in str(exc)
+
+
+def test_run_skips_judge_llm_call_end_to_end_when_single_candidate(monkeypatch):
+    """관련성 필터를 통과한 후보가 1개면 judge LLM(Qwen)이 실제로 호출되지
+    않고 그 후보가 바로 최종 결정이 돼야 한다(2026-08-27, LLM 제거 가능
+    지점 분석). challenge/refine은 이 테스트의 관심사가 아니므로 관련성
+    필터를 통과하는 즉시 challenge 없이도 파이프라인이 끝까지 도는지만
+    본다 - conftest의 네트워크 차단(tests/conftest.py) 덕분에 judge가
+    실제로 호출됐다면 이 테스트는 NetworkBlockedError로 실패한다."""
+    single = [_item("나이키 에어포스1 정품", 129000, code="1")]
+
+    async def _single_search(query, base_query, facet_answers, force_price_rescue=False):
+        return single
+
+    monkeypatch.setattr(adk_pipeline, "_search_candidates", _single_search)
+
+    result = asyncio.run(adk_pipeline.run("나이키 에어포스1 정품"))
+
+    assert result.decision.product_name == "나이키 에어포스1 정품"
+    assert "이것 하나뿐" in result.decision.reasoning
+    # 2026-08-27, 골든셋 실측 중 발견한 버그 회귀 방지 - Decision.verified가
+    # 항상 None으로 나오면 안 된다(challenge가 스킵/실패해도 Proposal 기본값은
+    # verified=True이므로 여기서도 True여야 한다).
+    assert result.decision.verified is True
 
 
 # ---------------------------------------------------------------------------
@@ -460,3 +509,46 @@ def test_judge_cache_lookup_returns_cached_index_on_hit(monkeypatch):
 
     assert result is not None
     assert adk_pipeline._llm_response_text(result) == '{"index": 0, "reasoning": "가성비 좋음"}'
+
+
+# ---------------------------------------------------------------------------
+# _skip_judge_if_single_candidate - 후보 1개면 LLM 호출 자체를 건너뛴다
+# (2026-08-27, LLM 제거 가능 지점 분석 - "여러 후보 중 고른다"는 judge의
+# 존재 이유가 후보 1개일 땐 성립하지 않는다).
+# ---------------------------------------------------------------------------
+
+
+def test_skip_judge_returns_index_zero_when_single_candidate():
+    ranked = [_item("나이키 에어포스1", 129000, code="1")]
+    ctx = _FakeCallbackContext({"ranked_items": ranked, "proposals": []})
+
+    result = adk_pipeline._skip_judge_if_single_candidate(ctx, llm_request=None)
+
+    assert result is not None
+    parsed = adk_pipeline.parse_json_object(adk_pipeline._llm_response_text(result))
+    assert parsed["index"] == 0
+    assert parsed["reasoning"]
+
+
+def test_skip_judge_does_nothing_when_multiple_candidates():
+    ranked = [
+        _item("나이키 에어포스1", 129000, code="1"),
+        _item("나이키 에어포스1 화이트", 135000, code="2"),
+    ]
+    ctx = _FakeCallbackContext({"ranked_items": ranked, "proposals": []})
+
+    result = adk_pipeline._skip_judge_if_single_candidate(ctx, llm_request=None)
+
+    assert result is None
+
+
+def test_skip_judge_does_not_skip_when_single_candidate_failed_challenge():
+    """후보가 1개뿐이어도 challenge에서 verified=False로 나왔으면 judge가
+    "그래도 이걸 골랐다"는 맥락을 설명해야 하므로 스킵하지 않는다."""
+    ranked = [_item("골프파우치", 9900, code="1")]
+    proposals = [{"verified": False, "challenge_note": "본품이 아닌 파우치"}]
+    ctx = _FakeCallbackContext({"ranked_items": ranked, "proposals": proposals})
+
+    result = adk_pipeline._skip_judge_if_single_candidate(ctx, llm_request=None)
+
+    assert result is None

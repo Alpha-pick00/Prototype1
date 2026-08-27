@@ -362,6 +362,7 @@ def _build_decision(
     ranked: list[elevenst.ElevenstSearchItem],
     recommended: tuple[int, str] | None,
     model_label: str,
+    verified: bool | None = None,
 ) -> Decision:
     """추천 Agent(judge/recommend 단계) 결과로 최종 추천(Decision)을 만든다.
     실패하면(키 없음·API 오류) 최저가 규칙 기반으로 폴백한다.
@@ -370,7 +371,17 @@ def _build_decision(
     단계는 Qwen을 직접 부르고(gpt.py를 안 거침), debate.py의 gpt.recommend_best는
     Qwen 쿼터 소진으로 임시 HCX를 쓴다(agents/gpt.py 모듈 docstring 참고) - 실제
     호출한 모델이 서로 달라 이 함수 하나에 라벨을 고정할 수 없다. 각 호출부가
-    자기가 실제로 부른 모델명을 넘긴다."""
+    자기가 실제로 부른 모델명을 넘긴다.
+
+    verified(2026-08-27, 골든셋 실측 중 발견 - schemas.Decision.verified의
+    docstring은 "구조화 데이터 실측처럼 challenge가 필요 없는 경우도
+    apply_challenge에서 True로 강제되므로 None에는 안 걸림"이라고 명시하는데,
+    실제로는 이 함수가 verified 인자 자체를 받지 않아 골든셋 50개 전량에서
+    decision.verified가 항상 None으로 나왔다 - 스키마 문서와 구현이 어긋난
+    버그. adk_pipeline.py가 judge로 고른 index의 challenge verified 값을
+    넘긴다 - challenge 자체가 없는 run_elevenst_only_debate(레거시 경로)는
+    인자를 안 넘겨 기존처럼 None 그대로 유지한다(그 경로는 애초에 검증
+    단계가 없으므로 None이 맞다)."""
     if recommended is not None:
         index, llm_reasoning = recommended
         best = ranked[index]
@@ -399,6 +410,7 @@ def _build_decision(
         chosen_agent="elevenst",
         price_source="elevenst_offer",
         image_url=best.get("image_url"),
+        verified=verified,
     )
 
 
