@@ -406,7 +406,18 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     Object.entries(selected).forEach(([label, values]) =>
       values.forEach((value) => rememberPreference(label, value))
     );
-    const combined = allValues.reduce((acc, value) => dedupeAppend(acc, value), origin.requestQuery).trim();
+    // AI 상세검색(clarify) 카드를 띄운 턴은 백엔드(check_clarify_facets)가
+    // 이미 대화체 원문을 정제한 값을 result.query로 돌려준다(2026-08-27,
+    // 사용자 리포트 - "아이폰 17을 구매하고 싶어" 검색 후 "아이폰 17"을
+    // 고르면 "아이폰 17을 구매하고 싶어 17"이 됨). 그런데 여기서는 항상
+    // origin.requestQuery(정제 전 원문)를 base로 썼다 - dedupeAppend는
+    // 토큰 문자열 비교라 "아이폰"/"17" 토큰이 정제 전 문장에는 그대로
+    // 안 남아있어(예: "구매하고 싶어" 같은 조사가 섞여 다른 토큰으로
+    // 갈라짐) 방금 고른 값이 중복으로 다시 붙었다. 정제된 값이 있으면
+    // 그걸 base로 써야 원문과 겹치는 토큰 없이 깔끔하게 이어진다.
+    const baseForCombine =
+      origin.result && origin.result.mode === 'clarify' ? origin.result.query : origin.requestQuery;
+    const combined = allValues.reduce((acc, value) => dedupeAppend(acc, value), baseForCombine).trim();
     // 2026-08-18(사용자 리포트: "핸드폰 한다음에 샤오미 넣었는데 샤오미만 다시
     // 검색되는게 뭐하는거야 '핸드폰 샤오미' 이렇게 전에 했던것도 붙여서 넣어야지")
     // - 실제로 백엔드에 보내는 requestQuery(=combined)는 이미 이전 검색어까지
