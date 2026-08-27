@@ -369,9 +369,10 @@ def _build_decision(
 
     model_label(2026-08-26) - 호출부가 둘로 갈렸다: adk_pipeline.py의 judge
     단계는 Qwen을 직접 부르고(gpt.py를 안 거침), debate.py의 gpt.recommend_best는
-    Qwen 쿼터 소진으로 임시 HCX를 쓴다(agents/gpt.py 모듈 docstring 참고) - 실제
-    호출한 모델이 서로 달라 이 함수 하나에 라벨을 고정할 수 없다. 각 호출부가
-    자기가 실제로 부른 모델명을 넘긴다.
+    의도적으로 HCX를 쓴다(agents/gpt.py 모듈 docstring 참고 - 한국어 이해도/
+    효용성 때문, 임시 조치 아님) - 실제 호출한 모델이 서로 달라 이 함수
+    하나에 라벨을 고정할 수 없다. 각 호출부가 자기가 실제로 부른 모델명을
+    넘긴다.
 
     verified(2026-08-27, 골든셋 실측 중 발견 - schemas.Decision.verified의
     docstring은 "구조화 데이터 실측처럼 challenge가 필요 없는 경우도
