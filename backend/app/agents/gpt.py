@@ -87,7 +87,9 @@ async def refine_query(query: str) -> str | None:
         return None
 
 
-async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str] | None:
+async def recommend_best(
+    query: str, candidates: list[dict], excluded_grade_tokens: list[str] | None = None
+) -> tuple[int, str] | None:
     """11번가 검증 후보(app.debate.run_elevenst_only_debate) 중 가장 추천할
     만한 것을 LLM이 고른다 - 가격만이 아니라 리뷰 수/구매만족도까지 본다.
     실패(키 없음·API 오류·범위 밖 index)하면 None - 호출부가 최저가 규칙
@@ -98,14 +100,24 @@ async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str] 
     직접 실측), index 선택과 개별 이유 생성은 서로 의존하지 않는 별개
     작업이라 별도 함수(candidate_notes)로 분리했다 - app.debate가 이 함수와
     asyncio.gather로 동시에 호출해, 전체 대기시간이 두 호출의 합이 아니라
-    더 느린 쪽 하나로 수렴하게 한다."""
+    더 느린 쪽 하나로 수렴하게 한다.
+
+    excluded_grade_tokens(2026-08-26) - _search_and_rank_candidates가 이미
+    이 토큰이 없는 후보를 앞으로 우대해뒀지만, 이 함수는 순서와 무관하게
+    자유롭게 고르는 별도 LLM이라 프롬프트에도 "[다른 등급]" 표시로 같은
+    정보를 넘겨야 실제로 반영된다(adk_pipeline.py의 judge와 동일한 이유)."""
     if not candidates:
         return None
     try:
         client = _client()
         response = await client.chat.completions.create(
             model=settings.hcx_recommend_model,
-            messages=[{"role": "user", "content": build_recommend_prompt(query, candidates)}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": build_recommend_prompt(query, candidates, excluded_grade_tokens),
+                }
+            ],
         )
         data = parse_json_object(response.choices[0].message.content or "")
         index = int(data.get("index"))

@@ -46,6 +46,36 @@ def test_build_recommend_prompt_omits_flag_when_verified_key_missing():
     assert "[검증 실패" not in candidates_block
 
 
+# ---------------------------------------------------------------------------
+# build_recommend_prompt - excluded_grade_tokens에 해당하는 후보에 [다른 등급]
+# 표시(2026-08-26, 사용자 리포트 - "아이폰 17이나 16으로 검색할 때 왜 프로나
+# 프로맥스만 매핑이 되는거야". 후보 순서는 우대해도 judge/추천 Agent가 순서와
+# 무관하게 자유롭게 골라 여전히 다른 등급을 추천하는 문제가 남아, 프롬프트에도
+# 명시적으로 표시해야 했다).
+# ---------------------------------------------------------------------------
+
+
+def test_build_recommend_prompt_flags_candidates_matching_excluded_grade_tokens():
+    candidates = [
+        {"product_name": "애플 아이폰 17 미국 버전 256GB", "price_krw": 1800000, "seller": "판매자"},
+        {"product_name": "아이폰 17 프로 맥스 256GB", "price_krw": 2000000, "seller": "판매자"},
+    ]
+    prompt = build_recommend_prompt("아이폰 17", candidates, excluded_grade_tokens=["프로", "프로 맥스"])
+    candidates_block = prompt.rsplit("후보:\n", 1)[1]
+    lines = candidates_block.splitlines()
+    assert "[다른 등급]" not in lines[0]
+    assert "[다른 등급]" in lines[1]
+
+
+def test_build_recommend_prompt_omits_grade_flag_when_no_tokens_given():
+    """excluded_grade_tokens를 안 넘기면(옛 호출부, 등급 문제 없는 대부분의
+    질의) 프롬프트가 기존과 동일해야 한다(회귀 없음)."""
+    candidates = [{"product_name": "아이폰 17 프로 맥스 256GB", "price_krw": 2000000, "seller": "판매자"}]
+    prompt = build_recommend_prompt("아이폰 17", candidates)
+    candidates_block = prompt.rsplit("후보:\n", 1)[1]
+    assert "[다른 등급]" not in candidates_block
+
+
 def _item(
     name: str,
     price: int,
@@ -153,7 +183,7 @@ def test_run_elevenst_only_debate_uses_recommend_agent_pick_over_cheapest(monkey
 
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         return 1, "리뷰가 훨씬 많아서 더 신뢰할 만함"
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
@@ -184,7 +214,7 @@ def test_run_elevenst_only_debate_drops_reasoning_that_leaks_internal_index(monk
 
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         return 1, "index 1의 상품이 다른 후보(0)보다 리뷰가 많아서 선택함"
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
@@ -214,7 +244,7 @@ def test_run_elevenst_only_debate_uses_candidate_notes_for_proposal_reasoning(mo
 
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         return 0, "가장 저렴함"
 
     async def _fake_notes(query, candidates):
@@ -242,7 +272,7 @@ def test_run_elevenst_only_debate_falls_back_to_generic_note_when_note_leaks_ind
 
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         return 0, "가장 저렴함"
 
     async def _fake_notes(query, candidates):
@@ -275,7 +305,7 @@ def test_run_elevenst_only_debate_propagates_image_url_to_decision_and_proposals
 
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         return 0, "가장 저렴함"
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
@@ -307,7 +337,7 @@ def test_run_elevenst_only_debate_propagates_review_count_and_buy_satisfy_to_pro
 
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         return 0, "가장 저렴함"
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
@@ -332,7 +362,7 @@ def test_run_elevenst_only_debate_falls_back_to_cheapest_when_recommend_agent_fa
 
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         return None
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
@@ -568,7 +598,7 @@ def test_run_elevenst_only_debate_refines_conversational_query_before_search(mon
 
     seen_recommend_query = {}
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         seen_recommend_query["query"] = query
         return 0, "가성비 좋음"
 
@@ -601,7 +631,7 @@ def test_run_elevenst_only_debate_skips_refine_for_clean_query(monkeypatch):
     async def _boom_refine(query):
         raise AssertionError("깨끗한 검색어인데 refine_query가 호출됐다")
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         return 0, "가장 저렴함"
 
     monkeypatch.setattr(debate.gpt, "refine_query", _boom_refine)
@@ -628,7 +658,7 @@ def test_run_elevenst_only_debate_falls_back_to_original_query_when_refine_fails
     async def _fake_refine(query):
         return None  # 실패(키 없음·API 오류)
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         return 0, "가장 저렴함"
 
     monkeypatch.setattr(debate.gpt, "refine_query", _fake_refine)
@@ -659,7 +689,7 @@ def test_run_elevenst_only_debate_uses_semantic_fallback_when_rapidfuzz_rejects_
 
     monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         return 0, "가장 관련성 높음"
 
     monkeypatch.setattr(debate.gpt, "recommend_best", _fake_recommend)
@@ -729,7 +759,7 @@ def test_run_elevenst_only_debate_filters_by_price_condition_before_recommending
 
     seen_candidates = {}
 
-    async def _fake_recommend(query, candidates):
+    async def _fake_recommend(query, candidates, excluded_grade_tokens=None):
         seen_candidates["candidates"] = candidates
         return 0, "가격대에 맞음"
 

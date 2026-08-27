@@ -64,8 +64,10 @@ from . import price_table as price_table_module
 from .agents.base import build_recommend_prompt, build_refine_query_prompt, parse_json_object
 from .config import settings
 from .debate import (
+    _apply_grade_mismatch_correction,
     _build_decision,
     _build_proposals,
+    _prioritize_exact_grade,
     _rank_by_relevance,
     _refine_base_query,
     _search_candidates,
@@ -102,8 +104,8 @@ def _candidate_cache_signature(items: list[dict]) -> str:
     return "|".join(f"{it.get('product_code') or it.get('url')}:{it['price_krw']}" for it in items)
 
 
-def _pipeline_cache_key(query: str, candidates: list[dict]) -> str:
-    return f"{query}::{_candidate_cache_signature(candidates)}"
+def _pipeline_cache_key(query: str, candidates: list[dict], extra: str = "") -> str:
+    return f"{query}{extra}::{_candidate_cache_signature(candidates)}"
 
 
 def _llm_response_text(llm_response: LlmResponse) -> str:
@@ -287,15 +289,34 @@ class _FilterMergeNode(BaseAgent):
         if not relevant:
             raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다.")
 
+        # 2026-08-26, 사용자 리포트("아이폰 17이나 16으로 검색할 때 왜 프로나
+        # 프로맥스만 매핑이 되는거야") - debate.py._search_and_rank_candidates와
+        # 동일한 로직/헬퍼 재사용(_apply_grade_mismatch_correction/
+        # _prioritize_exact_grade 참고 - 임베딩 코사인 유사도만으로는 등급
+        # 차이가 랭킹에 반영 안 됨을 실측 확인).
+        excluded_grade_tokens: list[str] = []
+        if not facet_answers:
+            items, excluded_grade_tokens = await _apply_grade_mismatch_correction(query, items, relevant)
+            if excluded_grade_tokens:
+                relevant = [
+                    it for it in items if price_table_module._product_name_matches(query, it["product_name"])
+                ]
+
         ranked = await _rank_by_relevance(query, relevant)
+        ranked = _prioritize_exact_grade(ranked, excluded_grade_tokens)
         # 2026-08-25 사용자 리포트("왜 200만원 넘는걸 추천한거지? 리뷰도 없고?")
         # 대응 - 의심스러운(중앙값 대비 파격 저가·"미개봉"/"완납" 문구) 후보를
         # 뒤로 미룬다. 프롬프트 경고 문구만으로는(agents/base.py) HCX-005가
         # 반복 무시하고 순수 최저가만 골라(같은 요청 2회 재현) 코드로 순서
         # 자체를 정해준다 - debate.py._search_and_rank_candidates와 동일한
         # 위치(관련도 랭킹 직후, recommend/judge 단계 전)에 적용한다.
-        ranked = price_table_module.deprioritize_suspicious(ranked)
-        yield Event(author=self.name, actions=EventActions(state_delta={"ranked_items": ranked}))
+        ranked = price_table_module.deprioritize_suspicious(ranked, excluded_grade_tokens)
+        yield Event(
+            author=self.name,
+            actions=EventActions(
+                state_delta={"ranked_items": ranked, "excluded_grade_tokens": excluded_grade_tokens}
+            ),
+        )
 
 
 def _dedupe_items(items: list[elevenst.ElevenstSearchItem]) -> list[elevenst.ElevenstSearchItem]:
@@ -555,11 +576,24 @@ def _on_judge_error(callback_context, llm_request, error) -> LlmResponse | None:
     return _model_error_fallback_response(_JudgeVerdict(index=-1, reasoning="").model_dump_json())
 
 
+def _judge_cache_key_extra(state: dict) -> str:
+    """judge 캐시 키에 excluded_grade_tokens를 반영한다(2026-08-26 실측 -
+    프롬프트에 "[다른 등급]" 표시를 추가하기 전 저장된 캐시가 그대로
+    재사용돼, 프롬프트를 바꿔도 judge가 실제로는 재호출조차 안 되고
+    옛(등급 미반영) 결과를 그대로 돌려주는 걸 확인했다. 후보 구성
+    (candidate signature)이 같아도 등급 표시 유무에 따라 프롬프트 내용
+    자체가 달라지니 캐시 키도 갈라야 한다."""
+    tokens = state.get("excluded_grade_tokens") or []
+    return "::grade=" + ",".join(sorted(tokens)) if tokens else ""
+
+
 async def _judge_cache_lookup(callback_context, llm_request) -> LlmResponse | None:
     candidates = _ranked_items(callback_context.state)
     if not candidates:
         return None
-    key = _pipeline_cache_key(_resolved_query(callback_context.state), candidates)
+    key = _pipeline_cache_key(
+        _resolved_query(callback_context.state), candidates, _judge_cache_key_extra(callback_context.state)
+    )
     cached = await llm_cache.exact_get(_JUDGE_CACHE_NAMESPACE, key)
     if cached is None:
         return None
@@ -580,7 +614,9 @@ async def _judge_cache_store(callback_context, llm_response: LlmResponse) -> Non
         return
     if parsed.get("index", -1) == -1:
         return
-    key = _pipeline_cache_key(_resolved_query(callback_context.state), candidates)
+    key = _pipeline_cache_key(
+        _resolved_query(callback_context.state), candidates, _judge_cache_key_extra(callback_context.state)
+    )
     await llm_cache.exact_set(_JUDGE_CACHE_NAMESPACE, key, parsed)
 
 
@@ -588,7 +624,8 @@ def _build_judge_agent() -> LlmAgent:
     def instruction(ctx: ReadonlyContext) -> str:
         query = _resolved_query(ctx.state)
         candidates = _candidates_with_verdicts(ctx.state)
-        return build_recommend_prompt(query, candidates)
+        excluded_grade_tokens = ctx.state.get("excluded_grade_tokens") or []
+        return build_recommend_prompt(query, candidates, excluded_grade_tokens)
 
     return LlmAgent(
         name="judge",

@@ -32,11 +32,17 @@ RECOMMEND_INSTRUCTIONS = (
     "일부 후보에는 '[검증 실패: ...]' 표시가 붙어있을 수 있습니다 - 별도 검증"
     "단계가 그 후보를 본품이 아닌 액세서리/다른 상품으로 의심된다고 판단한"
     "것입니다. "
-    "이 두 종류 표시(⚠/[검증 실패]) 중 어느 것도 없는 후보가 하나라도 있다면 "
-    "반드시 그중에서 고르세요. 부득이 표시가 있는 후보를 고를 수밖에 없는 "
-    "상황(그런 후보뿐인 경우 등)이라면, [검증 실패] 쪽을 ⚠ 표시만 있는 후보보다 "
-    "더 피하고(액세서리/다른 상품일 가능성이 더 명확한 신호이므로), reasoning에 "
-    "왜 그런지도 밝히세요. "
+    "일부 후보에는 '[다른 등급]' 표시가 붙어있을 수 있습니다 - 사용자 질의가 "
+    "가리키는 정확한 등급/모델이 아니라 그보다 상위나 하위 등급(예: 검색어가 "
+    "'아이폰 17'인데 '아이폰 17 프로'/'프로 맥스')이라는 뜻입니다. 사용자가 "
+    "질의에 그 상위 등급을 직접 언급하지 않은 이상, 더 비싸거나 스펙이 "
+    "좋아 보인다는 이유로 이 표시가 있는 후보를 고르지 마세요 - 사용자가 "
+    "명시적으로 요청한 것은 정확히 그 등급입니다. "
+    "이 세 종류 표시(⚠/[검증 실패]/[다른 등급]) 중 어느 것도 없는 후보가 "
+    "하나라도 있다면 반드시 그중에서 고르세요. 부득이 표시가 있는 후보를 "
+    "고를 수밖에 없는 상황(그런 후보뿐인 경우 등)이라면, [검증 실패] 쪽을 "
+    "[다른 등급]·⚠ 표시만 있는 후보보다 더 피하고(액세서리/다른 상품일 "
+    "가능성이 더 명확한 신호이므로), reasoning에 왜 그런지도 밝히세요. "
     "반드시 아래 후보 목록의 index 중 하나를 골라 JSON으로만 답하세요. 다른 "
     "텍스트나 코드펜스를 덧붙이지 마세요.\n\n"
     "reasoning은 사용자에게 그대로 노출되는 문장입니다 - 아래 후보 목록의 "
@@ -85,15 +91,25 @@ def _contract_suspicion_note(product_name: str) -> str:
     return ""
 
 
-def build_recommend_prompt(query: str, candidates: list[dict]) -> str:
+def _grade_mismatch_note(product_name: str, excluded_grade_tokens: list[str]) -> str:
+    if any(token in product_name for token in excluded_grade_tokens):
+        return " [다른 등급]"
+    return ""
+
+
+def build_recommend_prompt(
+    query: str, candidates: list[dict], excluded_grade_tokens: list[str] | None = None
+) -> str:
     seller_counts = _seller_listing_counts(candidates)
     median = median_price(candidates)
+    tokens = excluded_grade_tokens or []
     lines = []
     for i, c in enumerate(candidates):
         line = (
             f"[{i}] {c['product_name']} / {c['price_krw']:,}원"
             f"{_price_suspicion_note(c['price_krw'], median)}"
-            f"{_contract_suspicion_note(c['product_name'])} / "
+            f"{_contract_suspicion_note(c['product_name'])}"
+            f"{_grade_mismatch_note(c['product_name'], tokens)} / "
             f"판매자: {c['seller']} (동일 판매자 리스팅 {seller_counts[c['seller']]}건) / "
             f"리뷰 {c.get('review_count')}건 / 구매만족도 {c.get('buy_satisfy')}"
         )

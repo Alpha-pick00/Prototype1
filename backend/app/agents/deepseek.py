@@ -1,5 +1,6 @@
 import re
 from collections import defaultdict
+from typing import NamedTuple
 
 from openai import AsyncOpenAI
 
@@ -389,25 +390,36 @@ async def looks_accessory_flooded(query: str, product_names: list[str]) -> bool:
 # 그건 "같은 상품의 다른 표기"를, 이건 "같은 등급을 더 잘 찾는 부가 키워드"를
 # 찾는다.
 GRADE_MISMATCH_CHECK_INSTRUCTIONS = (
-    "당신은 쇼핑 검색어와 검색 결과 상품명 목록을 비교해, 검색어가 가리키는 "
-    "정확한 등급/모델의 본품이 실제로 목록에 있는지 판정하는 에이전트입니다. "
-    "예를 들어 검색어가 '아이폰 17'(기본형)인데 목록에 '아이폰 17 프로'나 "
-    "'아이폰 17 프로 맥스'만 있고 정작 기본형은 하나도 없을 수 있습니다 - 이런 "
-    "경우 상위/하위 등급이 검색어와 같은 제품 계열이라는 이유로 '있다'고 "
-    "판단하면 안 됩니다, 정확히 그 등급이어야만 '있다'입니다. 검색어가 원래 "
-    "특정 등급을 명시하지 않았다면(예: '노트북'처럼 등급 자체가 없는 질의) "
-    "이 문제가 성립하지 않으니 무조건 true로 답하세요. 목록에 검색어와 정확히 "
-    "같은 등급의 상품이 하나라도 있으면 exact_grade_present를 true로, 전부 "
-    "다른 등급뿐이면 false로 답하세요. 판단이 애매하면 true로 두세요(과도하게 "
-    "재검색을 유발하지 마세요).\n\n"
-    "exact_grade_present가 false일 때만, 검색어 뒤에 덧붙이면 그 카테고리에서 "
-    "액세서리/부속품/통신사 약정 상품 등 노이즈를 줄이고 정확한 등급의 본품을 "
-    "더 잘 찾을 수 있는 보정 키워드를 suggested_keyword에 하나 제안하세요 "
-    "(예: 휴대폰류는 '자급제', 그 외 카테고리는 상황에 맞게 - 확신이 없으면 "
-    "빈 문자열). exact_grade_present가 true면 suggested_keyword는 빈 문자열로 "
-    "두세요. 반드시 아래 JSON 형식으로만 답하세요. 다른 텍스트나 코드펜스를 "
-    "덧붙이지 마세요.\n\n"
-    '{"exact_grade_present": true, "suggested_keyword": ""}'
+    "당신은 쇼핑 검색어와 검색 결과 상품명 목록을 비교해, 목록에 검색어가 "
+    "가리키는 정확한 등급/모델이 아닌 다른 상위·하위 등급이 섞여 있는지 "
+    "판정하는 에이전트입니다. 예를 들어 검색어가 '아이폰 17'(기본형)인데 "
+    "목록에 '아이폰 17 프로'나 '아이폰 17 프로 맥스'가 섞여 있으면, 그 "
+    "상품들은 검색어와 다른(상위) 등급입니다 - 이건 표본에 정확한 등급의 "
+    "상품이 있는지와 무관하게 항상 식별해야 하는 사실입니다(정확한 등급이 "
+    "있어도 다른 등급 상품은 여전히 다른 등급입니다).\n\n"
+    "반드시 아래 순서로 직접 확인하세요(대충 훑지 말고 목록 전체를 하나씩 "
+    "봐야 합니다):\n"
+    "1단계 - 목록의 각 상품명에서 '프로'/'프로 맥스'/'프로맥스'/'플러스'/"
+    "'울트라'/'맥스'/'미니'/'에어'/'FE' 등 등급을 나타내는 수식어가 붙어있는지 "
+    "하나씩 확인하세요. 그런 수식어가 붙은 상품들이 실제로 목록에 하나라도 "
+    "있으면, 그 수식어들을 excluded_grade_tokens에 그대로 나열하세요(예: "
+    "[\"프로\", \"프로 맥스\", \"에어\"]). 브랜드명(Apple/애플), 판매형태"
+    "(자급제/미국 버전 등), 용량, 색상은 등급 수식어가 아니니 넣지 마세요. "
+    "목록에 그런 수식어가 붙은 상품이 하나도 없으면(전부 기본형이거나 원래 "
+    "등급 구분이 없는 카테고리) excluded_grade_tokens는 빈 배열입니다.\n"
+    "2단계 - 등급 수식어가 전혀 없이 검색어와 모델명만 일치하는(브랜드명/"
+    "판매형태/용량/색상 외에는 아무 수식어도 없는) 정확한 등급의 상품이 "
+    "목록에 하나라도 있으면 has_exact_grade를 true로, 없으면 false로 "
+    "답하세요. excluded_grade_tokens가 빈 배열이면(1단계에서 등급 구분 "
+    "자체가 없었으면) has_exact_grade는 무조건 true입니다.\n\n"
+    "has_exact_grade가 false일 때만 suggested_keyword를 채우세요 - 검색어 "
+    "뒤에 덧붙이면 그 카테고리에서 액세서리/부속품/통신사 약정 상품 등 "
+    "노이즈를 줄이고 정확한 등급의 본품을 더 잘 찾을 수 있는 보정 키워드 "
+    "하나(예: 휴대폰류는 '자급제', 그 외 카테고리는 상황에 맞게 - 확신이 "
+    "없으면 빈 문자열). has_exact_grade가 true면 suggested_keyword는 빈 "
+    "문자열로 두세요. 반드시 아래 JSON 형식으로만 답하세요. 다른 텍스트나 "
+    "코드펜스를 덧붙이지 마세요.\n\n"
+    '{"excluded_grade_tokens": [], "has_exact_grade": true, "suggested_keyword": ""}'
 )
 
 _MAX_GRADE_CHECK_ITEMS = 20
@@ -418,26 +430,60 @@ def build_grade_mismatch_check_prompt(query: str, product_names: list[str]) -> s
     return f"{GRADE_MISMATCH_CHECK_INSTRUCTIONS}\n\n검색어: {query}\n\n상품 목록:\n{lines}"
 
 
-async def check_grade_mismatch(query: str, product_names: list[str]) -> str | None:
-    """질의가 가리키는 정확한 등급(예: "아이폰 17" 기본형)의 본품이 표본에
-    없고 다른 등급(프로/프로맥스 등)뿐이면, 재검색에 덧붙일 보정 키워드를
+class GradeMismatchResult(NamedTuple):
+    """excluded_grade_tokens - 표본에 섞인, 질의와 다른 등급을 구분하는
+    단어들(_rank_by_relevance 뒤에 그 토큰이 없는 후보를 우대하는 데 쓴다 -
+    임베딩 코사인 유사도만으로는 "아이폰 17"과 "아이폰 17 프로"의 차이가
+    0.001 수준이라 랭킹에 반영이 안 됨, 2026-08-26 실측). 표본에 정확한
+    등급의 상품이 있는지와 무관하게(2026-08-26 실측 - "있으면 판정 자체를
+    스킵"하던 첫 설계는 있어도 임베딩 랭킹이 등급을 못 구분해 여전히 다른
+    등급이 1위로 뜨는 문제를 못 고쳤다) 항상 채워진다.
+
+    suggested_keyword - has_exact_grade가 false일 때만(정확한 등급의 상품이
+    표본에 아예 없을 때만) 재검색에 덧붙일 보정 키워드(카테고리별로 다름,
+    없으면 None) - has_exact_grade가 true면(정확한 등급이 이미 표본에
+    있으면) 재검색 없이 excluded_grade_tokens만으로 랭킹 우대."""
+
+    excluded_grade_tokens: list[str]
+    suggested_keyword: str | None
+
+
+_NO_GRADE_MISMATCH = GradeMismatchResult(excluded_grade_tokens=[], suggested_keyword=None)
+
+
+async def check_grade_mismatch(query: str, product_names: list[str]) -> GradeMismatchResult:
+    """표본에 질의와 다른 등급(프로/프로맥스 등)이 섞여 있으면 그 등급
+    구분 토큰을 항상 반환한다(정확한 등급이 표본에 이미 있어도) -
+    _prioritize_exact_grade가 랭킹에서 그 토큰이 없는 후보를 우대하는 데
+    쓴다. 정확한 등급이 표본에 아예 없으면 재검색 보정 키워드도 함께
     반환한다(카테고리 무관 - 휴대폰이 아니면 "자급제" 대신 그 카테고리에
-    맞는 키워드를 LLM이 판단). 등급이 이미 맞거나 애매하거나 실패하면 None
-    (보정 검색 트리거 안 함 - 그래프풀 폴백, 기존 동작 유지)."""
+    맞는 키워드를 LLM이 판단). 등급 구분이 없거나 애매하거나 실패하면
+    _NO_GRADE_MISMATCH(랭킹 우대/보정 검색 둘 다 트리거 안 함 - 그래프풀
+    폴백, 기존 동작 유지)."""
     if not product_names or not settings.deepseek_api_key:
-        return None
+        return _NO_GRADE_MISMATCH
     try:
         client = _client()
         prompt = build_grade_mismatch_check_prompt(query, product_names[:_MAX_GRADE_CHECK_ITEMS])
+        # temperature=0(2026-08-26 실측) - 이 판정은 사실 확인성 이진 분류라
+        # 기본 temperature로는 완전히 동일한 입력에도 exact_grade_present가
+        # true/false를 오갔다(3회 중 1회 오판) - 랭킹 우대가 매 요청 뒤집혀
+        # 사용자 눈엔 "가끔만 고쳐지는" 것처럼 보였다. 다른 값을 제안해야 하는
+        # looks_accessory_flooded 등과 달리 여기는 "표본에 이 등급이 있냐
+        # 없냐"는 결정적 사실 판정에 가까워 낮은 temperature가 정확도를
+        # 해치지 않는다.
         response = await client.chat.completions.create(
             model=settings.deepseek_model,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
+            temperature=0,
         )
         data = parse_json_object(response.choices[0].message.content or "")
-        if data.get("exact_grade_present") is not False:
-            return None
-        keyword = str(data.get("suggested_keyword") or "").strip()
-        return keyword or None
+        tokens = [str(t).strip() for t in (data.get("excluded_grade_tokens") or []) if str(t).strip()]
+        if not tokens:
+            return _NO_GRADE_MISMATCH
+        has_exact_grade = data.get("has_exact_grade") is not False
+        keyword = None if has_exact_grade else (str(data.get("suggested_keyword") or "").strip() or None)
+        return GradeMismatchResult(excluded_grade_tokens=tokens, suggested_keyword=keyword)
     except Exception:
-        return None
+        return _NO_GRADE_MISMATCH

@@ -84,7 +84,7 @@ def test_run_elevenst_only_debate_falls_back_to_query_variants_when_no_relevant_
 
     monkeypatch.setattr(debate.embeddings, "embed", _no_embed)
 
-    async def _no_recommend(query, candidates):
+    async def _no_recommend(query, candidates, excluded_grade_tokens=None):
         return None
 
     async def _no_notes(query, candidates):

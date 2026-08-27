@@ -12,6 +12,7 @@ from app.debate import (
     _facet_sort_key,
     _is_ambiguous_facets,
     _resolved_facet_count,
+    _search_and_rank_candidates,
     _search_candidates,
     _strip_cross_brand_options,
     _strip_resolved_facets,
@@ -197,70 +198,148 @@ def test_search_candidates_no_rescue_when_llm_says_not_flooded(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _search_candidates - 관련 후보는 있지만 전부 다른 등급뿐이라 질의가
-# 가리키는 정확한 등급이 표본에 없는 경우(2026-08-26, 사용자 리포트 - "아이폰
-# 17이나 16으로 검색할 때 왜 프로나 프로맥스만 매핑이 되는거야"). 실측:
-# "아이폰 17" 250개까지 넓혀도 기본형이 0건이었다 - 프로/프로맥스가 표본을
-# 압도했기 때문. 카테고리별로 다른 보정 키워드를 LLM이 제안한다(휴대폰
-# 전용인 "자급제"를 하드코딩하지 않음).
+# _search_and_rank_candidates - 관련 후보는 있지만 전부 다른 등급뿐이라
+# 질의가 가리키는 정확한 등급이 표본에 없는 경우(2026-08-26, 사용자 리포트 -
+# "아이폰 17이나 16으로 검색할 때 왜 프로나 프로맥스만 매핑이 되는거야").
+# 실측: "아이폰 17" 250개까지 넓혀도 기본형이 0건이었다 - 프로/프로맥스가
+# 표본을 압도했기 때문. 카테고리별로 다른 보정 키워드를 LLM이 제안한다
+# (휴대폰 전용인 "자급제"를 하드코딩하지 않음). 후보 풀에 정확한 등급이
+# 들어와도 임베딩 코사인 유사도만으로는 등급 차이가 랭킹에 거의 반영되지
+# 않아(실측 0.001 수준 차이) 최종 추천이 여전히 다른 등급을 고를 수 있으므로,
+# LLM이 짚어준 등급 구분 토큰(excluded_grade_tokens)이 없는 후보를 랭킹에서
+# 우대한다(_prioritize_exact_grade).
 # ---------------------------------------------------------------------------
 
 
-def test_search_candidates_rescues_via_grade_mismatch_keyword_when_only_higher_grade_found(monkeypatch):
+def test_search_and_rank_candidates_rescues_and_prioritizes_exact_grade(monkeypatch):
+    """재검색으로 새로 들어온 후보까지 포함해 등급 토큰을 다시 판정해야
+    한다(2026-08-26 실측 - 첫 판정의 excluded_grade_tokens는 재검색 전 표본
+    기준이라, 재검색으로 새로 들어온 다른 등급("에어" 등)이 우대 대상으로
+    잘못 분류되는 걸 봤다). 여기서는 재검색 후보(base)가 원래 표본에 없던
+    "라이트"라는 새 등급 신호를 상품명에 달고 있고, 재판정이 이를 반영해
+    excluded_grade_tokens에 "라이트"까지 추가해야 우대 정렬이 올바르다."""
+
     async def _fake_search(query, limit=5, sort_cd="A"):
         if query == "아이폰 17":
             return [_item("애플 아이폰 17 프로 맥스 256GB", price=2000000, code="pro")]
         assert query == "아이폰 17 자급제"
-        return [_item("애플 아이폰 17 미국 버전 256GB 자급제", price=1800000, code="base")]
+        return [
+            _item("애플 아이폰 17 미국 버전 256GB 자급제", price=1800000, code="base"),
+            _item("애플 아이폰 17 라이트 128GB 자급제", price=900000, code="lite"),
+        ]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    call_count = {"n": 0}
+
+    async def _fake_grade_check(query, product_names):
+        call_count["n"] += 1
+        assert query == "아이폰 17"
+        if call_count["n"] == 1:
+            assert product_names == ["애플 아이폰 17 프로 맥스 256GB"]
+            return debate.deepseek.GradeMismatchResult(suggested_keyword="자급제", excluded_grade_tokens=["프로"])
+        # 재검색 후 재판정 - 새로 들어온 "라이트"까지 반영된 결과를 준다.
+        assert set(product_names) == {
+            "애플 아이폰 17 프로 맥스 256GB",
+            "애플 아이폰 17 미국 버전 256GB 자급제",
+            "애플 아이폰 17 라이트 128GB 자급제",
+        }
+        return debate.deepseek.GradeMismatchResult(
+            suggested_keyword=None, excluded_grade_tokens=["프로", "라이트"]
+        )
+
+    monkeypatch.setattr(debate.deepseek, "check_grade_mismatch", _fake_grade_check)
+
+    async def _fake_embed(texts):
+        return None  # 원래 순서 유지 - 우대 정렬만 검증
+
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    query, ranked, note, tokens = asyncio.run(_search_and_rank_candidates("아이폰 17", None, None))
+
+    assert call_count["n"] == 2
+    # "프로"도 "라이트"도 없는 base만 앞으로 우대되고, pro/lite는 뒤로 밀린다.
+    assert ranked[0]["product_code"] == "base"
+    assert {it["product_code"] for it in ranked[1:]} == {"pro", "lite"}
+
+
+def test_search_and_rank_candidates_prioritizes_without_rescue_when_exact_grade_already_present(monkeypatch):
+    """정확한 등급이 이미 표본에 있어도(has_exact_grade=True) 재검색 없이
+    excluded_grade_tokens만으로 랭킹 우대가 걸려야 한다(2026-08-26 실측 -
+    "정확한 등급이 있으면 등급 판정 자체를 건너뛴다"던 첫 설계는 재검색은
+    안 해도 되지만, 임베딩 랭킹만으로는 등급 차이가 거의 반영 안 돼(0.001
+    수준) 여전히 다른 등급이 1위로 뜨는 문제를 못 고쳤다)."""
+
+    async def _fake_search(query, limit=5, sort_cd="A"):
+        return [
+            _item("애플 아이폰 17 프로 맥스 256GB", price=2000000, code="pro"),
+            _item("애플 아이폰 17 256GB", price=1200000, code="base"),
+        ]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
 
     async def _fake_grade_check(query, product_names):
-        assert query == "아이폰 17"
-        assert product_names == ["애플 아이폰 17 프로 맥스 256GB"]
-        return "자급제"
+        return debate.deepseek.GradeMismatchResult(excluded_grade_tokens=["프로 맥스"], suggested_keyword=None)
 
     monkeypatch.setattr(debate.deepseek, "check_grade_mismatch", _fake_grade_check)
 
-    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+    async def _fake_embed(texts):
+        return None  # 원래 순서 유지(pro, base) - 우대 정렬만 검증
 
-    codes = {it["product_code"] for it in result}
-    assert codes == {"pro", "base"}
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    query, ranked, note, tokens = asyncio.run(_search_and_rank_candidates("아이폰 17", None, None))
+
+    # 재검색 없이(fetchers.elevenst.search_elevenst가 "아이폰 17"로만 불림)
+    # "프로 맥스"가 없는 base가 원래 순서상 뒤였는데도 앞으로 우대된다.
+    assert [it["product_code"] for it in ranked] == ["base", "pro"]
 
 
-def test_search_candidates_skips_rescue_search_when_no_keyword_suggested(monkeypatch):
+def test_search_and_rank_candidates_skips_rescue_search_when_no_keyword_suggested(monkeypatch):
     async def _fake_search(query, limit=5, sort_cd="A"):
         return [_item("애플 아이폰 17 프로 맥스 256GB", price=2000000, code="pro")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
 
     async def _fake_grade_check(query, product_names):
-        return None
+        return debate.deepseek._NO_GRADE_MISMATCH
 
     monkeypatch.setattr(debate.deepseek, "check_grade_mismatch", _fake_grade_check)
 
-    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+    async def _fake_embed(texts):
+        return None
 
-    assert [it["product_code"] for it in result] == ["pro"]
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    query, ranked, note, tokens = asyncio.run(_search_and_rank_candidates("아이폰 17", None, None))
+
+    assert [it["product_code"] for it in ranked] == ["pro"]
 
 
-def test_search_candidates_skips_grade_check_when_no_relevant_items(monkeypatch):
-    """관련 후보 자체가 0개면(다른 이유로) 등급 편중 여부를 판단할 근거 자체가
-    없으므로 LLM 호출을 생략한다."""
+def test_search_and_rank_candidates_skips_grade_check_when_facet_answers_present(monkeypatch):
+    """드릴다운(facet_answers 있음)은 이미 구조적으로 필터링된 표본이라 등급
+    편중 보정을 다시 걸 필요가 없다 - LLM 호출을 생략한다."""
 
-    async def _fake_search(query, limit=5, sort_cd="A"):
-        return [_item("완전히 무관한 상품", price=1000, code="1")]
+    async def _fake_search(query, limit=90, sort_cd="A"):
+        return [_item("애플 아이폰 17 프로 맥스 256GB", price=2000000, code="pro")]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
 
     async def _boom(query, product_names):
-        raise AssertionError("관련 후보가 없는데 등급 편중 확인이 호출됐다")
+        raise AssertionError("facet_answers가 있는데 등급 편중 확인이 호출됐다")
 
     monkeypatch.setattr(debate.deepseek, "check_grade_mismatch", _boom)
 
-    result = asyncio.run(_search_candidates("아이폰 17", base_query=None))
+    async def _fake_embed(texts):
+        return None
 
-    assert [it["product_code"] for it in result] == ["1"]
+    monkeypatch.setattr(debate.embeddings, "embed", _fake_embed)
+
+    query, ranked, note, tokens = asyncio.run(
+        _search_and_rank_candidates("아이폰 17", "아이폰 17", {"기종": ["아이폰 17 프로 맥스"]})
+    )
+
+    assert [it["product_code"] for it in ranked] == ["pro"]
 
 
 def test_facet_resolved_true_when_option_already_in_query():

@@ -127,32 +127,79 @@ async def _search_candidates(
             query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT, sort_cd="H"
         )
         items = price_table_module._dedupe_by_product_code(items + high_price_items)
-
-    # 2026-08-26, 사용자 리포트("아이폰 17이나 16으로 검색할 때 왜 프로나
-    # 프로맥스만 매핑이 되는거야", 이후 "아이폰 뿐만 아니라 ... 모든 상품을
-    # 검색했을 때 검색 성능이 향상되도록") - 액세서리 도배와는 별개 문제다:
-    # 관련성 필터를 통과한 후보는 있는데(그래서 위 액세서리 트리거는 안 걸림)
-    # 전부 상위 등급(프로/프로맥스)뿐이고 질의가 가리키는 정확한 등급(기본형)
-    # 매물은 sortCd=A/H 표본 어디에도 없는 경우(실측: "아이폰 17" 250개까지
-    # 넓혀도 기본형 0건). looks_accessory_flooded와 같은 비용 절감 원칙(키워드
-    # 트리거가 못 잡는 경우만 LLM 확인) - 이건 애초에 키워드로 잡을 수 있는
-    # 성격이 아니라(등급 문자열이 상품마다, 카테고리마다 제각각) 바로 LLM
-    # 판단으로 간다. 보정 키워드도 "자급제"로 하드코딩하지 않고 카테고리별로
-    # LLM이 제안(deepseek.check_grade_mismatch) - 휴대폰이 아닌 카테고리에
-    # "자급제"를 붙이면 오히려 검색이 실패할 수 있다.
-    relevant_after_rescue = [
-        it for it in items if price_table_module._product_name_matches(query, it["product_name"])
-    ]
-    if relevant_after_rescue and not force_price_rescue:
-        suggested_keyword = await deepseek.check_grade_mismatch(
-            query, [it["product_name"] for it in relevant_after_rescue]
-        )
-        if suggested_keyword:
-            genuine_items = await _search_elevenst_safely(
-                f"{query} {suggested_keyword}", limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT
-            )
-            items = price_table_module._dedupe_by_product_code(items + genuine_items)
     return items
+
+
+# 2026-08-26, 사용자 리포트("아이폰 17이나 16으로 검색할 때 왜 프로나
+# 프로맥스만 매핑이 되는거야", 이후 "아이폰 뿐만 아니라 ... 모든 상품을
+# 검색했을 때 검색 성능이 향상되도록") - 액세서리 도배와는 별개 문제다:
+# 관련성 필터를 통과한 후보는 있는데(그래서 액세서리 트리거는 안 걸림) 전부
+# 상위 등급(프로/프로맥스)뿐이고 질의가 가리키는 정확한 등급(기본형) 매물은
+# sortCd=A/H 표본 어디에도 없는 경우(실측: "아이폰 17" 250개까지 넓혀도
+# 기본형 0건). _rank_by_relevance(임베딩 코사인 유사도)만으로는 "아이폰 17"과
+# "아이폰 17 프로"의 차이가 0.001 수준이라 랭킹에 반영되지 않는다(실측) -
+# 후보 자체는 이제 들어와도 최종 추천이 여전히 상위 등급을 고르는 문제가
+# 남았다. `_search_and_rank_candidates`/`_FilterMergeNode` 둘 다 관련성 필터
+# 직후 이 헬퍼로 (1)등급 편중 감지 시 보정 재검색 병합, (2)등급 구분 토큰이
+# 없는 후보를 랭킹에서 우대하는 정렬 키를 공유한다.
+async def _apply_grade_mismatch_correction(
+    query: str, items: list[elevenst.ElevenstSearchItem], relevant: list[elevenst.ElevenstSearchItem]
+) -> tuple[list[elevenst.ElevenstSearchItem], list[str]]:
+    """(보정된 items, excluded_grade_tokens)를 반환한다. excluded_grade_tokens는
+    표본에 섞인 다른 등급을 구분하는 단어들 - 정확한 등급이 표본에 이미
+    있어도(has_exact_grade=True) 채워진다(2026-08-26 실측 - "정확한 등급이
+    있으면 판정을 스킵"하던 첫 설계는 있어도 임베딩 랭킹이 등급을 못
+    구분해 여전히 다른 등급이 1위로 뜨는 문제를 못 고쳤다 - 항상 식별해야
+    랭킹 우대(_prioritize_exact_grade)가 제대로 동작한다). 비어있으면(등급
+    구분 자체가 없거나 판정 실패) 호출부가 랭킹을 그대로 두면 된다.
+
+    재검색이 실제로 걸리면(suggested_keyword 있음 - 정확한 등급이 표본에
+    아예 없을 때만) LLM을 한 번 더 부른다(2026-08-26 실측 - "아이폰 17"
+    원래 표본엔 프로/프로맥스뿐이라 excluded_grade_tokens가 ["프로", "프로
+    맥스"]였는데, "자급제" 보정 재검색으로 새로 들어온 "아이폰 17 에어"는
+    이 토큰 목록에 없어 우대 대상으로 잘못 분류됐다 - 재검색으로 표본
+    구성 자체가 바뀌었으니 등급 판정도 그 새 표본 기준으로 다시 해야
+    한다. 재검색이 안 걸렸으면(대부분의 질의) 추가 호출 없이 원래 판정을
+    그대로 쓴다."""
+    result = await deepseek.check_grade_mismatch(query, [it["product_name"] for it in relevant])
+    if not result.suggested_keyword:
+        return items, result.excluded_grade_tokens
+    genuine_items = await _search_elevenst_safely(
+        f"{query} {result.suggested_keyword}", limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT
+    )
+    merged = price_table_module._dedupe_by_product_code(items + genuine_items)
+    merged_relevant = [it for it in merged if price_table_module._product_name_matches(query, it["product_name"])]
+    if not merged_relevant:
+        return merged, result.excluded_grade_tokens
+    # 재검색으로 새로 들어온 항목(genuine_items - 보정 키워드로 찾은, 정확한
+    # 등급일 가능성이 가장 높은 후보)을 재판정 프롬프트 맨 앞으로 둔다
+    # (2026-08-26 실측 - merged_relevant를 원래 순서 그대로 넘기면 재검색
+    # 결과가 뒤쪽에 몰려 deepseek._MAX_GRADE_CHECK_ITEMS(20) 컷오프 밖으로
+    # 밀려날 수 있다 - "아이폰 17"에서 진짜 기본형이 merged_relevant의 23번째
+    # 항목이라 20개 제한에 안 보여, 재판정이 그 존재를 못 보고 여전히
+    # exact_grade_present=False를 냈다).
+    genuine_codes = {it.get("product_code") or it.get("url") for it in genuine_items}
+    reordered = sorted(
+        merged_relevant,
+        key=lambda it: (it.get("product_code") or it.get("url")) not in genuine_codes,
+    )
+    final_result = await deepseek.check_grade_mismatch(query, [it["product_name"] for it in reordered])
+    return merged, final_result.excluded_grade_tokens
+
+
+def _prioritize_exact_grade(
+    ranked: list[elevenst.ElevenstSearchItem], excluded_grade_tokens: list[str]
+) -> list[elevenst.ElevenstSearchItem]:
+    """excluded_grade_tokens(예: ["프로", "프로 맥스"])가 상품명에 없는 후보를
+    앞으로 stable-정렬한다 - 이미 관련도순으로 정렬된 순서(ranked) 안에서만
+    등급끼리의 우선순위를 뒤집을 뿐, 같은 등급 그룹 안의 상대 순서(임베딩
+    관련도)는 그대로 보존한다."""
+    if not excluded_grade_tokens:
+        return ranked
+    return sorted(
+        ranked,
+        key=lambda it: any(token in it["product_name"] for token in excluded_grade_tokens),
+    )
 
 
 async def _search_with_query_variants(query: str) -> list[elevenst.ElevenstSearchItem]:
@@ -244,7 +291,7 @@ def _format_price_condition(price_min: int | None, price_max: int | None) -> str
 
 async def _search_and_rank_candidates(
     query: str, base_query: str | None, facet_answers: dict[str, list[str]] | None
-) -> tuple[str, list[elevenst.ElevenstSearchItem], str | None]:
+) -> tuple[str, list[elevenst.ElevenstSearchItem], str | None, list[str]]:
     """검색 -> 관련성 필터 -> (0건이면 임베딩 의미 유사도 구제 -> 그래도 0건이면
     대안 표기 재검색) -> 가격 조건 필터 -> 관련도순 정렬까지, run_elevenst_only_debate()
     가 쓰는 앞부분이다. 질의에 가격 조건이 있으면(예: "2만원대") extract_price_range로 먼저
@@ -258,7 +305,15 @@ async def _search_and_rank_candidates(
     세 번째 반환값(price_miss_note)은 가격 조건이 있는데 그 범위 안에
     드는 후보가 하나도 없을 때만 문자열("2만원~3만원" 등)이고, 그 외엔
     None이다 - 호출부가 이 값이 있으면 추천 Agent를 부르지 않고 가격
-    근접순으로 이미 정렬된 ranked[0]을 규칙 기반으로 그대로 쓴다."""
+    근접순으로 이미 정렬된 ranked[0]을 규칙 기반으로 그대로 쓴다.
+
+    네 번째 반환값(excluded_grade_tokens, 2026-08-26)은 ranked에 표본을
+    압도한 다른 등급이 섞여 있으면 그 등급 구분 단어들이고, 없으면 빈
+    리스트다 - 호출부(gpt.recommend_best)가 프롬프트에도 "[다른 등급]"
+    표시로 넘겨야 judge/추천 Agent가 랭킹 순서와 무관하게 다시 다른 등급을
+    고르는 걸 막을 수 있다(랭킹 우대만으로는 최종 선택까지 못 막음, 실측
+    확인). 가격 미스매치 경로(price_miss_note가 있는 반환)에서는 등급 판정
+    자체를 안 하므로 항상 빈 리스트다."""
     raw_query = query
     query, price_min, price_max = extract_price_range(query)
     query = await _maybe_refine_query(query)
@@ -276,21 +331,31 @@ async def _search_and_rank_candidates(
     if not relevant:
         raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다.")
 
+    excluded_grade_tokens: list[str] = []
+    if not facet_answers:
+        items, excluded_grade_tokens = await _apply_grade_mismatch_correction(query, items, relevant)
+        if excluded_grade_tokens:
+            relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
+
     if price_min is None and price_max is None:
         ranked = await _rank_by_relevance(query, relevant)
-        return query, price_table_module.deprioritize_suspicious(ranked), None
+        ranked = _prioritize_exact_grade(ranked, excluded_grade_tokens)
+        ranked = price_table_module.deprioritize_suspicious(ranked, excluded_grade_tokens)
+        return query, ranked, None, excluded_grade_tokens
 
     in_range = [it for it in relevant if _price_in_range(it["price_krw"], price_min, price_max)]
     if in_range:
         ranked = await _rank_by_relevance(query, in_range)
-        return query, price_table_module.deprioritize_suspicious(ranked), None
+        ranked = _prioritize_exact_grade(ranked, excluded_grade_tokens)
+        ranked = price_table_module.deprioritize_suspicious(ranked, excluded_grade_tokens)
+        return query, ranked, None, excluded_grade_tokens
 
     # 가격 조건에 맞는 후보가 없다 - 가격이 가장 가까운 순으로 정렬해 반환한다
     # (임베딩 관련도 재정렬은 하지 않는다 - 여기서는 "가격이 가장 가깝다"가
     # 핵심 주장이라 그 순서를 그대로 지켜야 한다).
     price_miss_note = _format_price_condition(price_min, price_max)
     relevant.sort(key=lambda it: _price_distance(it["price_krw"], price_min, price_max))
-    return query, relevant, price_miss_note
+    return query, relevant, price_miss_note, []
 
 
 def _build_decision(
@@ -420,7 +485,9 @@ async def run_elevenst_only_debate(
     안에 드는 후보가 없으면, 추천 Agent를 부르지 않고 가격이 가장 근접한
     상품을 규칙 기반으로 안내한다(_build_price_miss_decision) - candidate_notes는
     "다른 후보" 이유 표시를 위해 그대로 부른다."""
-    query, ranked, price_miss_note = await _search_and_rank_candidates(query, base_query, facet_answers)
+    query, ranked, price_miss_note, excluded_grade_tokens = await _search_and_rank_candidates(
+        query, base_query, facet_answers
+    )
 
     if price_miss_note:
         notes = await gpt.candidate_notes(query, ranked)
@@ -430,7 +497,7 @@ async def run_elevenst_only_debate(
         # 서로 의존하지 않는 별개 작업이라 동시에 실행한다 - 순서대로 부르면
         # 두 호출 시간이 그대로 합산된다.
         recommended, notes = await asyncio.gather(
-            gpt.recommend_best(query, ranked),
+            gpt.recommend_best(query, ranked, excluded_grade_tokens),
             gpt.candidate_notes(query, ranked),
         )
         decision = _build_decision(ranked, recommended, model_label="HCX")

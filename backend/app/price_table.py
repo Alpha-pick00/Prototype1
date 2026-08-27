@@ -251,13 +251,31 @@ def is_trust_suspicious(item: elevenst.ElevenstSearchItem, median: float) -> boo
 
 def deprioritize_suspicious(
     items: list[elevenst.ElevenstSearchItem],
+    excluded_grade_tokens: list[str] | None = None,
 ) -> list[elevenst.ElevenstSearchItem]:
     """의심스러운 후보를 완전히 배제하지 않고 뒤로 미룬다 - 전부 의심스러우면
     (예: 이 검색어 자체가 원래 파격 세일 상품군) 안정 정렬 특성상 결과가
     그대로 유지되므로, 후보가 하나도 안 남는 사고가 나지 않는다. 각 그룹
     안에서는 기존 순서(임베딩 관련도순)를 그대로 유지한다(list.sort는
-    안정 정렬)."""
+    안정 정렬).
+
+    excluded_grade_tokens(2026-08-26 실측 - "아이폰 17" 검색) - 표본에 여러
+    등급(기본형/프로/프로맥스)이 섞이면 전체 중앙값 자체가 상위 등급 쪽으로
+    쏠려(예: 399만원), 정작 정확한 등급의 정상가(180만원대, 중앙값의 절반
+    미만)가 "파격 저가"로 오판돼 뒤로 밀렸다 - deepseek.check_grade_mismatch가
+    짚어준 등급 구분 토큰이 있으면, 그 토큰이 없는 그룹(정확한 등급)과 있는
+    그룹(다른 등급)으로 나눠 그룹별 중앙값으로 판정한다 - 등급이 섞이지
+    않은 표본(토큰 없음)에서는 기존 동작과 완전히 동일하다."""
     if not items:
         return items
-    median = median_price(items)
-    return sorted(items, key=lambda it: is_trust_suspicious(it, median))
+    if not excluded_grade_tokens:
+        median = median_price(items)
+        return sorted(items, key=lambda it: is_trust_suspicious(it, median))
+
+    exact_grade = [it for it in items if not any(t in it["product_name"] for t in excluded_grade_tokens)]
+    other_grade = [it for it in items if any(t in it["product_name"] for t in excluded_grade_tokens)]
+    exact_median = median_price(exact_grade)
+    other_median = median_price(other_grade)
+    exact_sorted = sorted(exact_grade, key=lambda it: is_trust_suspicious(it, exact_median))
+    other_sorted = sorted(other_grade, key=lambda it: is_trust_suspicious(it, other_median))
+    return exact_sorted + other_sorted
