@@ -7,9 +7,12 @@ import deepseekLogo from '../../assets/about/logos/deepseek.svg';
 import awsLogo from '../../assets/about/logos/aws.svg';
 import elevenstLogo from '../../assets/about/logos/11st.png';
 
-// "gpt" 에이전트 슬롯은 Qwen(DashScope)이 담당한다(backend/app/agents/gpt.py
-// 참고). qwen.svg는 lobehub/lobe-icons(MIT, AI 서비스 attribution 용도로 만든
-// 오픈소스 아이콘셋)에서 가져온 것 - Qwen 공식 자산이 아니라 커뮤니티 아이콘이다.
+// "gpt" 에이전트 슬롯은 HCX(HyperCLOVA X)가 담당한다(backend/app/agents/gpt.py
+// 참고 - 원래 Qwen이었다가 2026-08-25부터 한국어 이해도/효용성 때문에
+// 의도적으로 HCX로 전환, 임시 조치 아님). qwen.svg는 lobehub/lobe-icons(MIT,
+// AI 서비스 attribution 용도로 만든 오픈소스 아이콘셋)에서 가져온 것 - Qwen
+// 공식 자산이 아니라 커뮤니티 아이콘이다. Qwen은 여전히 임베딩(관련도 랭킹)과
+// judge(최종 추천 선택)를 담당해 실사용 비중이 커 계속 노출한다.
 //
 // 11st.png는 11번가 공식 브랜드 가이드(design.11stcorp.com/brand/logos,
 // 2026-08-25 확인)에서 받은 "11STREET Identity" 스크린용 배포 자산 그대로다 -
@@ -19,14 +22,21 @@ import elevenstLogo from '../../assets/about/logos/11st.png';
 // 색이 살아나는데, Black을 쓰면 그레이스케일이든 아니든 그냥 검정이라 이
 // 호버 효과가 다른 로고들과 다르게 안 먹혔다. 가이드의 금지규정(색상·형태·
 // 비례 변형 금지, 약칭 "11ST"/"11st" 단독 사용 금지)에 따라 이 파일을
-// 리컬러/리사이즈 없이 원본 그대로만 쓴다. HCX는
-// 여기엔 안 넣는다 - 이쪽은 공식 브랜드 가이드/배포 자산을 못 찾았고, 실제
-// 공식 파트너십 없이 로고(상표)만 올리면 관계를 과장해 보이는 위험이 여전히
-// 남아있다(HCX 언급은 How We Curate 섹션에 텍스트로만 유지).
-const poweredByClients = [
+// 리컬러/리사이즈 없이 원본 그대로만 쓴다.
+//
+// HCX는 로고 없이 텍스트로만 노출한다(2026-08-27) - 네이버 공식 CLOVA Studio
+// 브랜드 가이드(guide.ncloud-docs.com/docs/clovastudio-brand-guideline)가
+// "HyperCLOVA X_Logotype.zip"/"Powered by HyperCLOVA X_Logotype.zip" 배포
+// 자산을 명시하고 있지만, 이 저장소 환경에서 실제 다운로드 URL에 접근이
+// 안 돼(리소스 없음 응답) 자산 파일을 확보하지 못했다. 정확도(실제로 4개
+// LLM 중 하나로 쓰이는 사실)를 우선해 로고 없이 카드로 먼저 반영하고,
+// 나중에 파일을 구하면 logo 필드만 채우면 된다 - logo가 없으면
+// PoweredByCard가 자동으로 텍스트 전용 스타일로 렌더링한다.
+const poweredByClients: { name: string; url: string; logo?: string }[] = [
   { name: '11번가', url: 'https://www.11st.co.kr', logo: elevenstLogo },
   { name: 'Qwen', url: 'https://qwenlm.ai', logo: qwenLogo },
   { name: 'DeepSeek', url: 'https://www.deepseek.com', logo: deepseekLogo },
+  { name: 'HyperCLOVA X', url: 'https://clova.ai/clova-studio' },
   { name: 'Amazon AWS', url: 'https://aws.amazon.com', logo: awsLogo },
 ];
 
@@ -178,7 +188,13 @@ export const About = () => {
                   title={client.name}
                   className="shrink-0 flex items-center gap-3 h-16 px-6 rounded-xl bg-neutral-100 grayscale opacity-70 hover:grayscale-0 hover:opacity-100 transition-all cursor-pointer"
                 >
-                  <img src={client.logo} alt="" className="h-6 md:h-7 w-auto max-w-[32px] object-contain shrink-0" />
+                  {client.logo ? (
+                    <img src={client.logo} alt="" className="h-6 md:h-7 w-auto max-w-[32px] object-contain shrink-0" />
+                  ) : (
+                    <span className="h-6 md:h-7 w-8 shrink-0 flex items-center justify-center text-[10px] font-mono font-semibold tracking-wider text-neutral-500 border border-neutral-300 rounded">
+                      AI
+                    </span>
+                  )}
                   <span className="text-sm font-light tracking-wide text-neutral-700 whitespace-nowrap">
                     {client.name}
                   </span>
