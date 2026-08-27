@@ -622,10 +622,22 @@ def _filter_items_by_facet_answers(
     절대 무시하지 않는다"가 원칙이어야 진짜 순차적 HITL이다 - 조건에 맞는
     게 하나도 없으면(빈 리스트) 그 사실 자체를 있는 그대로 위로 돌려보내
     호출부가 "그 조건에는 결과가 없습니다"를 정직하게 반영하게 한다."""
+    # 관련성 판정 기준값 2단계(2026-08-27, 순차 아코디언 UI에서 실측 발견 -
+    # "아이폰 17"에서 "용량" 축만 먼저 답하면(구매유형/색상은 아직 안 물어봄)
+    # facet_answers가 {"용량": ["2TB"]}뿐이라 selected_values가 "2TB" 하나뿐이고,
+    # _product_name_matches("2TB", 상품명)은 제품 계열을 특정할 문맥이 전혀
+    # 없어 항상 실패했다(실측: "Apple 아이폰 17 프로 맥스 ... 2TB ..."조차
+    # 걸러짐) - 실제로 존재하는 조합인데도 "검색 결과를 찾지 못했다"로
+    # 잘못 실패했다. selected_values 매칭이 실패하면 query 전체(예: "아이폰
+    # 17 2TB")로도 재시도한다 - query에는 이미 답한 축뿐 아니라 카테고리
+    # 문맥도 남아있어 방금 답한 축 하나만으로는 판단 못 하는 상품도 구제한다.
     selected_values = [v for values in facet_answers.values() for v in values]
     relevance_query = " ".join(selected_values) or query
     items = [
-        item for item in items if price_table_module._product_name_matches(relevance_query, item["product_name"])
+        item
+        for item in items
+        if price_table_module._product_name_matches(relevance_query, item["product_name"])
+        or (relevance_query != query and price_table_module._product_name_matches(query, item["product_name"]))
     ]
     groups = [
         [_normalize_for_match(v) for v in values] for values in facet_answers.values() if values

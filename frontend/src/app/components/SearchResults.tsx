@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
-import { AlertTriangle, ArrowUpRight, Check, ImageOff, Loader2, RotateCcw, Search, Sparkles, Truck, X } from 'lucide-react';
+import { AlertTriangle, ArrowUpRight, Check, ImageOff, Loader2, RotateCcw, Search, Sparkles, Truck } from 'lucide-react';
 import type {
   ClarifyFacet as ClarifyFacetType,
   DecideResult,
@@ -10,6 +10,7 @@ import type {
 } from '../lib/api';
 import { checkClarifyFacets } from '../lib/api';
 import { dedupeAppend } from '../context/SearchContext';
+import { getStoredToken } from '../lib/auth';
 
 const fadeUp = {
   initial: { opacity: 0, y: 16 },
@@ -236,10 +237,12 @@ interface Props {
   // 옵션 순서 자체는 백엔드가 이미 반영해 보내주므로, 여기서는 일치하는
   // 버튼에 "선호" 표시만 붙이는 시각적 용도로 쓴다.
   sessionPreferences?: Record<string, string>;
+  // 드릴다운 체인의 맨 처음 검색어(2026-08-27) - 단계별 재검색
+  // (checkClarifyFacets)이 이걸 base_query로 보내야 매 단계 캐시를 재사용한다.
+  baseQuery?: string;
   // (사용자 페르소나, 2026-08-15) label -> 선택값 맵을 그대로 넘긴다 - 값
   // 배열만 받으면 SearchContext가 어느 facet 라벨에서 이 값을 골랐는지 몰라
-  // 계정/세션 페르소나에 기록할 수 없다. 다중 선택 지원(2026-08-24)으로 값
-  // 하나가 아니라 배열이다 - 같은 facet에서 여러 개를 고를 수 있다(OR로 검색).
+  // 계정/세션 페르소나에 기록할 수 없다.
   onConfirmFacets: (selected: Record<string, string[]>) => void;
   // 조건을 하나도 안 고르고 원래 질의 그대로 포괄적으로 검색한다(2026-08-24,
   // "선택 안해도 그냥 바로 포괄적으로도 검색 가능하게 하고 싶어").
@@ -249,319 +252,224 @@ interface Props {
 export const SearchResults = ({
   result,
   sessionPreferences = {},
+  baseQuery,
   onConfirmFacets,
   onSearchBroadly,
 }: Props) => {
-  // AI 상세검색: facet마다 하나씩 고른다. 예전엔 화면에 떠 있는 기준을 전부
-  // 골라야만 검색이 실행됐는데(2026-08-13: "상세검색에서 고를때마다 검색하는걸로
-  // 바꿧어 다시 다 고르면 검색되는걸로 바꿔"), 사용자가 원하는 값이 목록에
-  // 없거나 모든 기준을 다 정하고 싶지 않을 수도 있어서(2026-08-14: "일부분만
-  // 선택해도 넘어갈 수 있게") 지금은 "검색하기" 버튼을 눌러야 그 시점까지 고른
-  // 값(일부만 골랐어도 그대로)으로 진행한다. facets는 mode==='clarify'일 때만
-  // 존재하지만 Hooks는 조건부로 못 부르니 다른 모드에서는 빈 배열로 둔다.
-  // 다중 선택 지원(2026-08-24, "하나밖에 선택을 못하는데 여러개 선택할 수
-  // 있게") - facet 라벨 하나에 값 여러 개를 담을 수 있다(OR로 검색됨).
-  const [selectedFacets, setSelectedFacets] = useState<Record<string, string[]>>({});
-  const [facetQuery, setFacetQuery] = useState<Record<string, string>>({});
+  // 단계별(아코디언) AI 상세검색(2026-08-27, 사용자 요청: "하나의 박스를
+  // 선택하면 그 아래로 계속 축소되는 형식으로 만들어주고 상품이 존재할 때만
+  // 박스 선택할 수 있게") - 예전엔 모든 축(기종/용량/색상 등)을 한 화면에
+  // 동시에 보여주고 "검색하기"를 눌러야 진행됐는데, 백엔드가 이미 순차적
+  // HITL(답한 축은 안 묻고 표본을 실제로 좁혀가는 구조)로 재구성됐으므로
+  // (app/debate.py::check_clarify_facets의 _strip_resolved_facets) 프론트도
+  // 한 번에 한 축만 보여주고, 옵션을 고르면 즉시 백엔드에 그 축까지 반영해
+  // 재검색해서(facet_answers) "실제로 남은 상품에 근거한" 다음 축을 받아온다.
+  // 이러면 화면에 뜨는 옵션은 항상 그 시점 실측 표본에서 나온 값이라 "상품이
+  // 존재할 때만 선택 가능"이 자동으로 성립한다(0건이 되는 조합 자체를 화면에
+  // 올리지 않음).
+  const initialFacets = result.mode === 'clarify' ? result.options.facets : [];
+
+  // stepAnswers: 지금까지 확정한 축 {라벨: 값} - 순서 보존을 위해 배열도 같이 든다.
+  const [answeredLabels, setAnsweredLabels] = useState<string[]>([]);
+  const [stepAnswers, setStepAnswers] = useState<Record<string, string[]>>({});
+  // 서버가 방금 재검색해서 돌려준 "지금 물어야 할 축들" - 이 중 첫 번째만
+  // 현재 단계로 보여준다(나머지는 다음 단계에서 다시 요청 시 갱신됨).
+  const [pendingFacets, setPendingFacets] = useState<ClarifyFacetType[]>(initialFacets);
+  const [stepLoading, setStepLoading] = useState(false);
+  const [stepError, setStepError] = useState(false);
+  const [facetQuery, setFacetQuery] = useState('');
+  const lastQueryRef = useRef(result.mode === 'clarify' ? result.query : '');
+
   // GPT 쇼핑의 "이거랑 비슷한거 더" 패턴 벤치마킹(2026-08-18, 사용자 요청
   // "GPT 쇼핑의 장점을 잘 접목시켜줘") - judge가 고른 최종 추천 하나만
   // 클릭 가능했는데, propose 단계에서 이미 받아온 다른 후보(proposals)도
   // 전부 실제 구매 가능한 상품(URL·가격 확보됨)이다. mode==='single'에서만
   // 쓰이지만 Hooks는 조건부로 못 부르니 다른 모드에서는 그냥 null로 둔다.
   const [selectedProposalUrl, setSelectedProposalUrl] = useState<string | null>(null);
-  const facets = result.mode === 'clarify' ? result.options.facets : [];
 
-  // 2026-08-18(사용자 요청: "AI상세검색에서 샤오미 즉 검색어에 관련된거를
-  // 뜨게하라고 몇번을 말하냐") - 자유 텍스트로 타이핑한 값(예: "샤오미")은
-  // 원래 clarify 응답의 facet 목록엔 없던 값이라, 다른 facet들도 그 값을
-  // 반영해 좁혀줄 근거(options_by_selection)가 애초에 존재하지 않는다.
-  // "검색어에 관련된 것"을 실제로 보여주려면 지어내지 않고 진짜로 그 결합
-  // 검색어("핸드폰 샤오미")에 대해 다시 물어봐야 한다 - check_clarify_facets를
-  // base_query 없이 호출하면(캐시 재사용 최적화를 건너뛰어) 11번가를 그
-  // 결합 검색어로 실제로 다시 검색해서, 실제로 존재하는 샤오미 관련 facet
-  // (기종·용량 등)을 새로 뽑아온다. liveFacets가 있으면 원래 facets 대신
-  // 이걸 보여준다 - 라벨/구성이 달라질 수 있어 selectedFacets는 초기화한다.
-  const [liveFacets, setLiveFacets] = useState<ClarifyFacetType[] | null>(null);
-  const [liveFacetsLoading, setLiveFacetsLoading] = useState(false);
-  const lastLiveFetchRef = useRef<string | null>(null);
-  // 2026-08-18(사용자 요청: "결과 지금 좋은데 '샤오미' 친거 안사라지고 냅둬") -
-  // liveFacets가 로드되면 그걸 촉발한 원래 facet("핸드폰 기종")이 새 facet
-  // 세트(시리즈/모델/용량)엔 아예 없을 수 있어, 거기 타이핑해둔 "샤오미"를
-  // 보여줄 곳 자체가 사라졌다. 그 값을 여기 별도로 붙잡아두고 계속 칩으로
-  // 보여준다 - 최종 검색어에도 계속 포함시킨다(값이 실제로 사라지면 안 되니까).
-  const [appliedFreeText, setAppliedFreeText] = useState<Record<string, string>>({});
-  const displayFacets = liveFacets ?? facets;
+  const currentFacet: ClarifyFacetType | null = pendingFacets[0] ?? null;
 
-  // 지금까지 고른 값들(어느 facet이든 - 브랜드로 한정 안 됨)로 아직 안 고른
-  // facet들의 보이는 옵션을 즉시 좁힌다(추가 요청 없이, 사용자 요청 2026-08-13:
-  // "삼성전자를 누르면은 시리즈에 삼성전자에 관한것만" -> 2026-08-14: "시리즈에
-  // 초코파이 바나나를 골랏다면 용량에 없는것들은 선택할수없게" - 브랜드 전용
-  // 특수 케이스였던 걸 모든 facet 쌍으로 일반화했다). 여러 facet을 골랐으면
-  // 각각의 options_by_selection을 교집합으로 겹쳐 좁힌다.
-  // 다중 선택(2026-08-24) - 한 facet에서 여러 값을 고를 수 있어, 다른
-  // facet의 옵션을 좁힐 때도 그 값들 각각의 options_by_selection을
-  // 합집합(OR)으로 겹친다 - "이 값 중 아무거나와 공존 가능한 옵션"이어야
-  // "브랜드에 오리온·롯데 둘 다 고름 -> 둘 중 아무 브랜드에나 있는 용량은
-  // 계속 보여야 함"이 성립한다.
-  const visibleOptionsFor = (facet: ClarifyFacetType, selected: Record<string, string[]>): string[] => {
-    let options = facet.options;
-    for (const [otherLabel, values] of Object.entries(selected)) {
-      if (otherLabel === facet.label || values.length === 0) continue;
-      const filteredSets = values
-        .map((v) => facet.options_by_selection?.[v])
-        .filter((s): s is string[] => !!s);
-      if (filteredSets.length === 0) continue;
-      const union = new Set(filteredSets.flat());
-      options = options.filter((o) => union.has(o));
-    }
-    return options;
-  };
-
-  const computeNextSelectedFacets = (
-    prev: Record<string, string[]>,
-    label: string,
-    option: string
-  ): Record<string, string[]> => {
-    const current = prev[label] ?? [];
-    const next: Record<string, string[]> = { ...prev };
-    if (current.includes(option)) {
-      const remaining = current.filter((v) => v !== option);
-      if (remaining.length > 0) next[label] = remaining;
-      else delete next[label];
-    } else {
-      next[label] = [...current, option];
-    }
-    // 이 선택으로 다른 facet의 보이는 옵션이 바뀌어 기존 선택 중 일부(또는
-    // 전부)가 더 이상 유효한 값이 아니게 됐으면 지운다 - 안 그러면 서로 안
-    // 맞는 조합(예: "초코파이 바나나" + "336g")이 그대로 남아있을 수 있다.
-    for (const other of displayFacets) {
-      if (other.label === label) continue;
-      const selectedForOther = next[other.label];
-      if (!selectedForOther || selectedForOther.length === 0) continue;
-      const visible = visibleOptionsFor(other, next);
-      const stillValid = selectedForOther.filter((v) => visible.includes(v));
-      if (stillValid.length === 0) delete next[other.label];
-      else if (stillValid.length !== selectedForOther.length) next[other.label] = stillValid;
-    }
-    return next;
-  };
-
-  // 2026-08-18 - 옵션 클릭마다 즉시 검색을 쏘면(직전 시도) 시리즈+용량+구매유형처럼
-  // 여러 축을 조합해서 한 번에 검색하는 AI 상세검색 본연의 기능이 깨진다(첫 클릭에서
-  // 바로 새 턴으로 넘어가버려 두 번째 축을 고를 기회가 없어짐, 사용자 리포트: "AI
-  // 상세검색별로 검색할수있는 기능을 왜 없애 - 다시 살려내고") - 되돌린다. 옵션
-  // 클릭은 다시 선택 상태만 바꾸고, 여러 축을 다 고른 뒤 "검색하기"를 눌러야
-  // 진행된다(2026-08-13/14 결정 그대로).
-  const selectFacetOption = (label: string, option: string) => {
-    setSelectedFacets((prev) => computeNextSelectedFacets(prev, label, option));
-  };
-
-  // 2026-08-18(사용자 리포트: "'마우스' 검색 후 브랜드에 '삼성' 넣었는데 그
-  // '삼성'(으)로 검색 버튼을 안 눌러도 검색하기가 활성화돼야지" + "특징에
-  // 인체공학을 누르고 검색하기를 누르니까 삼성 키워드 자체가 사라졌어") - 두
-  // 문제가 사실 하나다: 목록에 없는 값을 타이핑만 하고 그 facet의 "선택"
-  // 버튼을 안 눌렀으면 selectedFacets엔 전혀 안 남아서, (1) 검색하기가
-  // 안 켜지고 (2) 그 상태로 다른 facet을 확정해 검색하면 타이핑해둔 값이
-  // 통째로 사라졌다. 아직 명시적으로 선택 안 됐지만(=selectedFacets에 없지만)
-  // 매칭되는 옵션도 없는 타이핑 값은 "선택하겠다는 의도"로 보고, 검색하기의
-  // 활성화·최종 전송 값 둘 다에 자동으로 포함시킨다(각 facet당 한 번씩 클릭을
-  // 더 요구하지 않는다). 실제로 옵션 버튼을 클릭해 selectedFacets에 명시적으로
-  // 들어간 값이 있으면 그게 우선한다.
-  const pendingFreeTextFacets: Record<string, string> = {};
-  for (const facet of displayFacets) {
-    if (selectedFacets[facet.label]?.length) continue;
-    const typed = (facetQuery[facet.label] ?? '').trim();
-    if (!typed) continue;
-    const opts = visibleOptionsFor(facet, selectedFacets);
-    const hasMatch = opts.some((o) => o.toLowerCase().includes(typed.toLowerCase()));
-    if (!hasMatch) pendingFreeTextFacets[facet.label] = typed;
-  }
-  // 타이핑한 자유 텍스트 값은 그 facet에 이미 버튼으로 고른 값이 있어도
-  // 대체하지 않고 추가한다(다중 선택, 2026-08-24) - 버튼 선택과 타이핑을
-  // 섞어 쓸 수 있어야 한다.
-  const effectiveSelectedFacets: Record<string, string[]> = { ...selectedFacets };
-  for (const [label, value] of Object.entries({ ...pendingFreeTextFacets, ...appliedFreeText })) {
-    const existing = effectiveSelectedFacets[label] ?? [];
-    if (!existing.includes(value)) effectiveSelectedFacets[label] = [...existing, value];
-  }
-
-  useEffect(() => {
+  // 방금 고른 값까지 반영해 서버에 다시 물어본다 - 실제로 남은 표본에서
+  // 다음 축을 뽑아온다(0건이 되는 옵션은 애초에 화면에 올라오지 않는다).
+  // 남은 축이 없으면(facets: []) 더 물을 게 없다는 뜻이므로 그대로
+  // onConfirmFacets를 호출해 최종 검색으로 넘어간다.
+  const advanceStep = async (label: string, value: string) => {
     if (result.mode !== 'clarify') return;
-    if (Object.keys(pendingFreeTextFacets).length === 0) return;
-    const combined = Object.values(effectiveSelectedFacets)
+    const nextAnsweredLabels = [...answeredLabels, label];
+    const nextAnswers: Record<string, string[]> = { ...stepAnswers, [label]: [value] };
+    setAnsweredLabels(nextAnsweredLabels);
+    setStepAnswers(nextAnswers);
+    setFacetQuery('');
+    setStepLoading(true);
+    setStepError(false);
+    try {
+      const combined = Object.values(nextAnswers)
+        .flat()
+        .reduce((acc, v) => dedupeAppend(acc, v), lastQueryRef.current)
+        .trim();
+      const resp = await checkClarifyFacets(
+        combined,
+        baseQuery,
+        sessionPreferences,
+        getStoredToken(),
+        nextAnswers
+      );
+      lastQueryRef.current = resp.query;
+      if (resp.options.facets.length > 0) {
+        setPendingFacets(resp.options.facets);
+      } else {
+        onConfirmFacets(nextAnswers);
+      }
+    } catch {
+      setStepError(true);
+    } finally {
+      setStepLoading(false);
+    }
+  };
+
+  // 확정한 축을 되돌아가 다시 고른다 - 그 축 이후에 답한 값은 전제가
+  // 깨지므로(예: 기종을 바꾸면 그 아래서 고른 용량이 안 맞을 수 있음) 같이 지운다.
+  const rewindTo = (index: number) => {
+    if (result.mode !== 'clarify') return;
+    const trimmedLabels = answeredLabels.slice(0, index);
+    const trimmedAnswers: Record<string, string[]> = {};
+    for (const label of trimmedLabels) trimmedAnswers[label] = stepAnswers[label];
+    setAnsweredLabels(trimmedLabels);
+    setStepAnswers(trimmedAnswers);
+    setFacetQuery('');
+    setStepError(false);
+    setStepLoading(true);
+    const combined = Object.values(trimmedAnswers)
       .flat()
       .reduce((acc, v) => dedupeAppend(acc, v), result.query)
       .trim();
-    if (!combined || combined === lastLiveFetchRef.current) return;
-
-    const timer = setTimeout(() => {
-      lastLiveFetchRef.current = combined;
-      setLiveFacetsLoading(true);
-      // base_query를 안 넘긴다 - 넘기면 백엔드가 캐시 재사용을 위해 원래
-      // 검색어("핸드폰")로만 검색하고 결과를 로컬 필터링하는데, 그 원래
-      // 검색결과엔애초에 샤오미가 없어 필터링하면 0건이 된다. base_query
-      // 없이 결합 검색어 그대로 새로 검색해야 진짜 샤오미 관련 결과가 나온다.
-      checkClarifyFacets(combined)
-        .then((resp) => {
-          if (resp.options.facets.length > 0) {
-            setLiveFacets(resp.options.facets);
-            // 이 요청을 쏘게 만든 자유 텍스트 값을 계속 붙잡아둔다(예:
-            // "핸드폰 기종"="샤오미") - 새로 받은 facet 세트엔 그 라벨이
-            // 아예 없을 수 있어도, 사용자가 타이핑한 값 자체는 화면에서
-            // 사라지면 안 되고 최종 검색어에도 계속 포함돼야 한다.
-            setAppliedFreeText((prev) => ({ ...prev, ...pendingFreeTextFacets }));
-            setSelectedFacets({});
-          }
-        })
-        .catch(() => {})
-        .finally(() => setLiveFacetsLoading(false));
-    }, 600);
-
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [JSON.stringify(pendingFreeTextFacets), JSON.stringify(effectiveSelectedFacets), result.mode, result.query]);
+    checkClarifyFacets(combined || result.query, baseQuery, sessionPreferences, getStoredToken(), trimmedAnswers)
+      .then((resp) => {
+        lastQueryRef.current = resp.query;
+        setPendingFacets(resp.options.facets);
+      })
+      .catch(() => setStepError(true))
+      .finally(() => setStepLoading(false));
+  };
 
   if (result.mode === 'clarify') {
-    const hasAnyOptions = displayFacets.length > 0;
+    const hasCurrentStep = !!currentFacet;
+    const query = facetQuery.trim();
+    const visibleOptions = currentFacet
+      ? query
+        ? currentFacet.options.filter((o) => o.toLowerCase().includes(query.toLowerCase()))
+        : currentFacet.options
+      : [];
 
     return (
       <Card>
         <span className="text-xs font-mono uppercase tracking-widest text-neutral-400 block mb-4">
-          {hasAnyOptions ? 'AI 상세검색 · 조건을 선택하거나 채팅으로 답해주세요' : '조건을 좁힐 수 없었어요'}
+          {hasCurrentStep ? 'AI 상세검색 · 조건을 하나씩 선택해주세요' : '조건을 좁힐 수 없었어요'}
         </span>
-        {Object.keys(appliedFreeText).length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-4 last:mb-0">
-            {Object.entries(appliedFreeText).map(([label, value]) => (
-              <span
+        {/* 이미 확정한 축들 - 접힌 요약 칩. 클릭하면 그 축으로 되돌아간다. */}
+        {answeredLabels.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-5 last:mb-0">
+            {answeredLabels.map((label, index) => (
+              <button
                 key={label}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-neutral-950 text-white text-sm font-light"
+                type="button"
+                onClick={() => rewindTo(index)}
+                disabled={stepLoading}
+                className="group inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-neutral-950 text-white text-sm font-light disabled:opacity-50 hover:bg-neutral-800 transition-colors"
               >
-                {value}
-                <button
-                  type="button"
-                  onClick={() =>
-                    setAppliedFreeText((prev) => {
-                      const next = { ...prev };
-                      delete next[label];
-                      return next;
-                    })
-                  }
-                  aria-label={`${value} 조건 해제`}
-                  className="hover:opacity-70 transition-opacity"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </span>
+                <Check className="w-3.5 h-3.5 text-[#4ADE80]" strokeWidth={3} />
+                <span className="text-neutral-400 font-mono text-[10px] uppercase tracking-widest">{label}</span>
+                {stepAnswers[label]?.[0]}
+              </button>
             ))}
           </div>
         )}
-        {liveFacetsLoading && (
+        {stepLoading && (
           <div className="mb-4 flex items-center gap-2 text-xs font-light text-neutral-400">
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            타이핑한 검색어와 관련된 조건을 다시 찾는 중...
+            실제 남은 상품을 기준으로 다음 조건을 찾는 중...
           </div>
         )}
-        {displayFacets.map((facet) => {
-          const baseOptions = visibleOptionsFor(facet, effectiveSelectedFacets);
-          const query = facetQuery[facet.label] ?? '';
-          const visibleOptions = query.trim()
-            ? baseOptions.filter((o) => o.toLowerCase().includes(query.trim().toLowerCase()))
-            : baseOptions;
-          return (
-            <div key={facet.label} className="mb-4 last:mb-0">
-              <span className="text-xs font-light text-neutral-400 block mb-2">{facet.label}</span>
-              {/* 원래 옵션이 4개 이하면 검색창 자체가 없었는데, 실제 궁합
-                  데이터로 다른 facet이 이 facet의 옵션을 전부 걸러낼 수도
-                  있어(정상 케이스, 예: 이미 고른 값과 공존하는 옵션이 없음) -
-                  그 경우에도 직접 타이핑할 길이 있어야 막다른 길이 안 된다. */}
-              {(facet.options.length > 4 || baseOptions.length === 0) && (
-                <div className="relative mb-2">
-                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-300" />
-                  <input
-                    type="text"
-                    value={query}
-                    onChange={(e) => setFacetQuery((prev) => ({ ...prev, [facet.label]: e.target.value }))}
-                    onKeyDown={(e) => {
-                      // 2026-08-18(사용자 리포트: "샤오미를 치고 바로 엔터하면
-                      // 검색하게 바꿔줘") - 매칭 옵션이 없어 pendingFreeTextFacets에
-                      // 이미 잡힌 타이핑 값(및 다른 facet에서 이미 확정된 값)을
-                      // 그대로 검색하기와 동일하게 제출한다.
-                      if (e.key === 'Enter' && Object.keys(effectiveSelectedFacets).length > 0) {
-                        e.preventDefault();
-                        onConfirmFacets(effectiveSelectedFacets);
-                      }
-                    }}
-                    placeholder={`${facet.label} 찾기`}
-                    autoComplete="off"
-                    className="w-full pl-8 pr-3 py-2 rounded-full border border-black/10 text-sm font-light outline-none focus:border-neutral-950 transition-colors"
-                  />
-                </div>
-              )}
-              <div className="flex flex-wrap gap-2">
-                {visibleOptions.length > 0 ? (
-                  visibleOptions.map((option) => {
-                    const isSelected = selectedFacets[facet.label]?.includes(option) ?? false;
-                    // 사용자 페르소나(2026-08-15) - 이번 세션에서 이 라벨에 이미
-                    // 골랐던 값이면 별 표시로 "평소 선택"임을 알려준다. 옵션
-                    // 순서 자체(맨 앞으로 당기기)는 백엔드가 이미 반영했으니
-                    // 여기서는 순수 시각적 확인 표시.
-                    const isPersonaPick = !isSelected && sessionPreferences[facet.label] === option;
-                    return (
-                      <button
-                        key={option}
-                        onClick={() => selectFacetOption(facet.label, option)}
-                        className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-full border text-sm font-light transition-all ${
-                          isSelected
-                            ? 'bg-neutral-950 text-white border-neutral-950'
-                            : isPersonaPick
-                            ? 'border-[#4ADE80]/50 bg-[#4ADE80]/10 hover:bg-neutral-950 hover:text-white hover:border-neutral-950'
-                            : 'border-black/10 hover:bg-neutral-950 hover:text-white hover:border-neutral-950'
-                        }`}
-                      >
-                        {isPersonaPick && <Sparkles className="w-3 h-3 text-[#166534]" strokeWidth={2.5} />}
-                        {option}
-                      </button>
-                    );
-                  })
-                ) : query.trim() ? (
-                  // 2026-08-18(사용자 리포트: "11번가에는 아이폰 15랑 샤오미가
-                  // 있어" - 목록에 없는 값을 찾으면 막다른 "일치하는 항목이
-                  // 없어요"만 뜨고 검색할 방법이 없었다) - 백엔드가 미리 뽑아준
-                  // 옵션 목록은 그 순간 11번가 검색 결과 상위 몇 건에서 나온
-                  // 값일 뿐 전체 카탈로그가 아니다. 그 목록에 없다고 검색 자체를
-                  // 막지 말고, 타이핑한 값을 그대로 이 facet의 선택값으로 써서
-                  // 검색하게 한다.
-                  <button
-                    onClick={() => selectFacetOption(facet.label, query.trim())}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-dashed border-black/20 text-sm font-light text-neutral-600 hover:bg-neutral-950 hover:text-white hover:border-neutral-950 transition-all"
-                  >
-                    "{query.trim()}"(으)로 검색
-                  </button>
-                ) : (
-                  <span className="text-xs font-light text-neutral-400">일치하는 항목이 없어요</span>
-                )}
+        {stepError && (
+          <div className="mb-4 text-xs font-light text-amber-700">
+            조건을 불러오지 못했어요. 조건 없이 검색하거나 다시 시도해주세요.
+          </div>
+        )}
+        {!stepLoading && currentFacet && (
+          <div className="mb-4 last:mb-0">
+            <span className="text-xs font-light text-neutral-400 block mb-2">{currentFacet.label}</span>
+            {currentFacet.options.length > 4 && (
+              <div className="relative mb-2">
+                <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-300" />
+                <input
+                  type="text"
+                  value={facetQuery}
+                  onChange={(e) => setFacetQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    // 2026-08-18(사용자 리포트: "샤오미를 치고 바로 엔터하면
+                    // 검색하게 바꿔줘") - 목록에 없는 값을 타이핑하고 바로
+                    // 제출하면 그 값을 이 축의 답으로 확정하고 다음 단계로 진행한다.
+                    if (e.key === 'Enter' && query) {
+                      e.preventDefault();
+                      advanceStep(currentFacet.label, query);
+                    }
+                  }}
+                  placeholder={`${currentFacet.label} 찾기`}
+                  autoComplete="off"
+                  className="w-full pl-8 pr-3 py-2 rounded-full border border-black/10 text-sm font-light outline-none focus:border-neutral-950 transition-colors"
+                />
               </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              {visibleOptions.length > 0 ? (
+                visibleOptions.map((option) => {
+                  // 사용자 페르소나(2026-08-15) - 이번 세션에서 이 라벨에 이미
+                  // 골랐던 값이면 별 표시로 "평소 선택"임을 알려준다.
+                  const isPersonaPick = sessionPreferences[currentFacet.label] === option;
+                  return (
+                    <button
+                      key={option}
+                      onClick={() => advanceStep(currentFacet.label, option)}
+                      className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-full border text-sm font-light transition-all ${
+                        isPersonaPick
+                          ? 'border-[#4ADE80]/50 bg-[#4ADE80]/10 hover:bg-neutral-950 hover:text-white hover:border-neutral-950'
+                          : 'border-black/10 hover:bg-neutral-950 hover:text-white hover:border-neutral-950'
+                      }`}
+                    >
+                      {isPersonaPick && <Sparkles className="w-3 h-3 text-[#166534]" strokeWidth={2.5} />}
+                      {option}
+                    </button>
+                  );
+                })
+              ) : query ? (
+                // 2026-08-18(사용자 리포트: "11번가에는 아이폰 15랑 샤오미가
+                // 있어" - 목록에 없는 값을 찾으면 막다른 "일치하는 항목이
+                // 없어요"만 뜨고 검색할 방법이 없었다) - 백엔드가 미리 뽑아준
+                // 옵션 목록은 그 순간 11번가 검색 결과 상위 몇 건에서 나온
+                // 값일 뿐 전체 카탈로그가 아니다. 타이핑한 값을 그대로 이
+                // 축의 답으로 써서 다음 단계로 진행한다.
+                <button
+                  onClick={() => advanceStep(currentFacet.label, query)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-dashed border-black/20 text-sm font-light text-neutral-600 hover:bg-neutral-950 hover:text-white hover:border-neutral-950 transition-all"
+                >
+                  "{query}"(으)로 검색
+                </button>
+              ) : (
+                <span className="text-xs font-light text-neutral-400">일치하는 항목이 없어요</span>
+              )}
             </div>
-          );
-        })}
-        {displayFacets.length > 0 && (
+          </div>
+        )}
+        {!stepLoading && (hasCurrentStep || answeredLabels.length > 0 || stepError) && (
           <div className="mb-4 last:mb-0 flex justify-end items-center gap-3">
-            {/* 조건 없이 그냥 검색(2026-08-24) - 축을 하나도 안 골라도 원래
-                질의 그대로 포괄적으로 검색할 수 있어야 한다. "검색하기"와
-                달리 선택 여부와 무관하게 항상 눌린다. */}
+            {/* 조건 없이 그냥 검색(2026-08-24) - 남은 축을 마저 안 골라도 지금까지
+                고른 값(또는 하나도 없으면 원래 질의) 그대로 검색할 수 있어야 한다. */}
             <button
               type="button"
-              onClick={onSearchBroadly}
+              onClick={() => (answeredLabels.length > 0 ? onConfirmFacets(stepAnswers) : onSearchBroadly())}
               className="text-sm font-light text-neutral-400 hover:text-neutral-950 transition-colors"
             >
-              조건 없이 검색
-            </button>
-            <button
-              onClick={() => onConfirmFacets(effectiveSelectedFacets)}
-              disabled={Object.keys(effectiveSelectedFacets).length === 0}
-              className="px-5 py-2.5 rounded-full bg-[#4ADE80] text-neutral-950 text-sm font-medium disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[#3EBD6E] transition-all"
-            >
-              검색하기
+              {answeredLabels.length > 0 ? '여기까지만 검색' : '조건 없이 검색'}
             </button>
           </div>
         )}
