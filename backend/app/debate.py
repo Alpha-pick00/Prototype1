@@ -110,18 +110,20 @@ async def _search_candidates(
     # 탈락했다"는 "액세서리 낱말이 흔했다"는 신호와 다르므로(단순히 무관한
     # 카테고리라 하나도 안 겹칠 수도 있다) force_price_rescue처럼 무조건
     # 켜지는 않고, 원본 표본 자체가 실제로 액세서리 낱말투성이일 때만 켠다.
-    # relevant가 비어있으면 LLM에게 보여줄 "관련 상품" 자체가 없어 의미 기반
-    # 재확인(looks_accessory_flooded)도 걸 수 없으므로 키워드 판정으로 끝낸다.
-    if not relevant:
-        needs_rescue = force_price_rescue or price_table_module.most_candidates_look_like_accessories(query, items)
-    else:
-        needs_rescue = force_price_rescue or price_table_module.most_candidates_look_like_accessories(query, relevant)
-        if not needs_rescue:
-            # 키워드 트리거가 안 걸렸을 때만(비용 절감) LLM으로 한 번 더 확인한다
-            # (2026-08-26, 사용자 요청 - "비용 시간 늘어나도 일단 상품이 잘
-            # 매핑되어야 해"). 키워드 목록에 없는 표현을 쓴 액세서리 도배까지
-            # 의미로 잡아낸다.
-            needs_rescue = await deepseek.looks_accessory_flooded(query, [it["product_name"] for it in relevant])
+    check_pool = relevant if relevant else items
+    needs_rescue = force_price_rescue or price_table_module.most_candidates_look_like_accessories(query, check_pool)
+    if not needs_rescue:
+        # 키워드 트리거가 안 걸렸을 때만(비용 절감) LLM으로 한 번 더 확인한다
+        # (2026-08-26, 사용자 요청 - "비용 시간 늘어나도 일단 상품이 잘
+        # 매핑되어야 해"). 키워드 목록에 없는 표현을 쓴 액세서리 도배까지
+        # 의미로 잡아낸다. relevant가 비어있을 때도 원본 items를 넘겨서
+        # 판정한다(2026-08-27 실측, "맥북 에어" - 원본 30개 중 24개(80%)만
+        # ACCESSORY_INDICATOR_TOKENS에 걸려 키워드 트리거(90% 임계값)를 못
+        # 넘겼는데, 나머지 6개도 "LCD 분해 도구"/"키캡"처럼 실제로는 전부
+        # 액세서리·수리부품이었다 - relevant가 비었다고 의미 판정 자체를
+        # 건너뛰면 이런 사전에 없는 표현의 도배를 영영 못 잡는다).
+        check_names = [it["product_name"] for it in check_pool]
+        needs_rescue = await deepseek.looks_accessory_flooded(query, check_names)
     if needs_rescue:
         high_price_items = await _search_elevenst_safely(
             query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT, sort_cd="H"
