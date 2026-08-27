@@ -1289,6 +1289,43 @@ def test_strip_query_answered_options_leaves_untouched_facet_with_only_one_optio
     assert result == facets
 
 
+def test_strip_query_answered_options_keeps_option_that_exactly_equals_query():
+    """2026-08-27 사용자 리포트("아이폰 17 검색하면 아직도 17이 안떠") - 옵션이
+    질의와 완전히 같은 문자열이면 지우면 안 된다. 원래 이 필터는 "텀블러"를
+    검색했는데 옵션에 "텀블러"만 또 뜨는(질의보다 정보가 적은 부분집합) 걸
+    막으려는 의도였는데, "아이폰 17" 검색에 "핸드폰 기종" 옵션으로 정확히
+    "아이폰 17"이 나온 경우까지 "이미 답한 값"으로 오판해 지워버렸다 - 그
+    경우 "아이폰 17 프로"/"프로 맥스"만 남아 정작 사용자가 검색한 정확한
+    등급을 선택할 수 없게 됐다."""
+    facets = [ClarifyFacet(label="핸드폰 기종", options=["아이폰 17", "아이폰 17 프로", "아이폰 17 프로 맥스"])]
+
+    result = _strip_query_answered_options("아이폰 17", facets)
+
+    assert result == facets
+
+
+def test_strip_query_answered_options_still_removes_true_substring_of_query():
+    """옵션이 질의보다 정보가 적은 진짜 부분집합("스탠리 텀블러"의 "텀블러")이면
+    여전히 제거해야 한다(2026-08-18 원래 리포트 - 회귀 없음 확인)."""
+    facets = [
+        ClarifyFacet(
+            label="제품분류",
+            options=["텀블러", "보틀", "머그"],
+            options_by_selection={"473ml": ["텀블러", "보틀"], "709ml": ["텀블러"]},
+        )
+    ]
+
+    result = _strip_query_answered_options("스탠리 텀블러", facets)
+
+    assert result == [
+        ClarifyFacet(
+            label="제품분류",
+            options=["보틀", "머그"],
+            options_by_selection={"473ml": ["보틀"]},
+        )
+    ]
+
+
 def test_check_clarify_facets_strips_query_redundant_option_end_to_end(monkeypatch):
     async def _fake_search_danawa(query, limit=3):
         return [

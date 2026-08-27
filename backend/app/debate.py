@@ -969,14 +969,27 @@ def _strip_query_answered_options(query: str, facets: list[ClarifyFacet]) -> lis
     텀블러"/"나이키 반팔티" 둘 다 재현) 여기서 한 번 더 거른다. 질의를 공백 제거
     + 소문자로 정규화해 그 안에 그대로 부분 문자열로 포함되는 옵션만 제거한다 -
     "반팔티"처럼 질의에 있는 그대로의 표현만 잡고, "반팔 티셔츠"처럼 표현이 달라진
-    동의어까지는 못 잡는다(그건 프롬프트 쪽 개선 영역으로 남겨둔다)."""
+    동의어까지는 못 잡는다(그건 프롬프트 쪽 개선 영역으로 남겨둔다).
+
+    옵션이 질의 전체와 완전히 같은 문자열이면 지우지 않는다(2026-08-27, 사용자
+    리포트 "아이폰 17 검색하면 아직도 17이 안떠") - 원래 이 함수는 옵션이 질의의
+    "진짜 부분집합"일 때만 지우려는 의도였다("스탠리 텀블러"에서 "텀블러"는
+    "스탠리"라는 추가 정보를 질의가 더 갖고 있으므로 부분집합) - 그런데 등급이
+    있는 상품(예: "아이폰 17" 자체가 "아이폰 17 프로"와 별개인 정확한 등급)은
+    질의가 이미 그 값과 완전히 동일해서, "부분 문자열로 포함된다"는 조건에
+    걸려 옵션 자체가 통째로 사라졌다(예: "아이폰 17"을 검색했는데 "핸드폰 기종"
+    옵션에 정작 "아이폰 17"이 없고 "아이폰 17 프로"/"프로 맥스"만 남음). 옵션이
+    질의보다 더 구체적인 정보를 담고 있지 않으면(즉 질의와 완전히 같으면) 그건
+    "이미 답한 다른 개념"이 아니라 "정확히 그 값" - 사용자가 명시적으로 선택할
+    수 있게 남겨둬야 한다."""
     normalized_query = _normalize_for_query_match(query)
     result: list[ClarifyFacet] = []
     for facet in facets:
         kept = [
             opt
             for opt in facet.options
-            if _normalize_for_query_match(opt) not in normalized_query
+            if _normalize_for_query_match(opt) == normalized_query
+            or _normalize_for_query_match(opt) not in normalized_query
         ]
         if len(kept) == len(facet.options):
             # 아무것도 안 걸러졌으면 원래 facet을 그대로 둔다 - 옵션이 원래부터
