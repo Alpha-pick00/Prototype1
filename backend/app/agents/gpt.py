@@ -1,7 +1,11 @@
+import logging
+
 from openai import AsyncOpenAI
 
 from ..config import settings
 from .base import build_candidate_notes_prompt, build_recommend_prompt, build_refine_query_prompt, parse_json_object
+
+logger = logging.getLogger(__name__)
 
 # 이 모듈이 담당하는 에이전트 슬롯은 스키마/프론트엔드/테스트 전반에서
 # agent="gpt"로 식별된다(파일명·함수명도 그대로) - 하지만 실제로 호출하는
@@ -62,6 +66,7 @@ async def refine_query(query: str) -> str | None:
         refined = str(data.get("query") or "").strip()
         return refined or None
     except Exception:
+        logger.exception("gpt.refine_query: Qwen 호출 실패, 원래 질의 그대로 진행")
         return None
 
 
@@ -93,6 +98,7 @@ async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str] 
             return None
         return index, str(data.get("reasoning") or "").strip()
     except Exception:
+        logger.exception("gpt.recommend_best: Qwen 호출 실패, 최저가 규칙 기반으로 폴백")
         return None
 
 
@@ -131,4 +137,5 @@ async def candidate_notes(query: str, candidates: list[dict]) -> dict[int, str]:
                 notes[index] = str(value).strip()
         return notes
     except Exception:
+        logger.exception("gpt.candidate_notes: Qwen 호출 실패, 후보 이유 없이 진행")
         return {}

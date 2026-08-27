@@ -16,6 +16,7 @@ False라 before_model_callback이 LLM 호출 자체를 건너뛰고, filter_merg
 from __future__ import annotations
 
 import asyncio
+import json
 
 from google.adk.models import LlmResponse
 from google.genai import types
@@ -104,6 +105,21 @@ def test_apply_challenge_verdicts_leaves_uncovered_candidates_untouched():
     proposals = adk_pipeline._apply_challenge_verdicts(ranked, {"verdicts": []})
     assert proposals[0]["verified"] is True
     assert proposals[0]["challenge_note"] is None
+
+
+def test_apply_challenge_verdicts_uses_candidate_notes_for_reasoning():
+    """2026-08-26 회귀 방지 - notes를 안 넘기면(예전 코드처럼 _build_proposals(
+    ranked, {})를 그대로 부르면) 모든 "다른 후보"가 똑같은 고정 문구만
+    달게 된다(사용자 리포트 - "제품마다 추천이유 만들도록 시켰었잖아").
+    gpt.candidate_notes 결과를 notes로 넘기면 각 Proposal의 reasoning이
+    개별적으로 채워져야 한다."""
+    ranked = [_item("A", 1000, code="1"), _item("B", 2000, code="2")]
+    notes = {0: "가장 저렴하고 리뷰도 많음", 1: "용량이 더 커서 대용량이 필요하면 적합"}
+
+    proposals = adk_pipeline._apply_challenge_verdicts(ranked, {"verdicts": []}, notes)
+
+    assert proposals[0]["reasoning"] == "가장 저렴하고 리뷰도 많음"
+    assert proposals[1]["reasoning"] == "용량이 더 커서 대용량이 필요하면 적합"
 
 
 def test_resolved_query_prefers_refine_result_over_original():
@@ -380,3 +396,47 @@ def test_judge_cache_lookup_returns_cached_index_on_hit(monkeypatch):
 
     assert result is not None
     assert adk_pipeline._llm_response_text(result) == '{"index": 0, "reasoning": "가성비 좋음"}'
+
+
+# ---------------------------------------------------------------------------
+# settings.rule_based_mode(2026-08-26, "데모 영상만 찍으면 되니깐 그냥 규칙
+# 기반으로 만들어줄래") - refine/challenge/judge 세 LlmAgent 모두 켜져
+# 있으면 실제 모델 호출 전에 기존 on_*_error 폴백과 같은 응답으로
+# 대신한다는 것만 확인한다(폴백 내용 자체는 이미 위 테스트들이 검증했다).
+# ---------------------------------------------------------------------------
+
+
+def test_skip_refine_if_rule_based_returns_none_when_off():
+    ctx = _FakeCallbackContext({"original_query": "나이키 신발 사고싶어", "rule_based": False})
+    assert adk_pipeline._skip_refine_if_rule_based(ctx, llm_request=None) is None
+
+
+def test_skip_refine_if_rule_based_uses_original_query_when_on():
+    ctx = _FakeCallbackContext({"original_query": "나이키 신발 사고싶어", "rule_based": True})
+    result = adk_pipeline._skip_refine_if_rule_based(ctx, llm_request=None)
+    assert result is not None
+    assert json.loads(adk_pipeline._llm_response_text(result))["query"] == "나이키 신발 사고싶어"
+
+
+def test_skip_challenge_if_rule_based_returns_none_when_off():
+    ctx = _FakeCallbackContext({"rule_based": False})
+    assert adk_pipeline._skip_challenge_if_rule_based(ctx, llm_request=None) is None
+
+
+def test_skip_challenge_if_rule_based_yields_empty_verdicts_when_on():
+    ctx = _FakeCallbackContext({"rule_based": True})
+    result = adk_pipeline._skip_challenge_if_rule_based(ctx, llm_request=None)
+    assert result is not None
+    assert json.loads(adk_pipeline._llm_response_text(result)) == {"verdicts": []}
+
+
+def test_skip_judge_if_rule_based_returns_none_when_off():
+    ctx = _FakeCallbackContext({"rule_based": False})
+    assert adk_pipeline._skip_judge_if_rule_based(ctx, llm_request=None) is None
+
+
+def test_skip_judge_if_rule_based_yields_no_verdict_sentinel_when_on():
+    ctx = _FakeCallbackContext({"rule_based": True})
+    result = adk_pipeline._skip_judge_if_rule_based(ctx, llm_request=None)
+    assert result is not None
+    assert json.loads(adk_pipeline._llm_response_text(result)) == {"index": -1, "reasoning": ""}

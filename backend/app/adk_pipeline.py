@@ -61,6 +61,7 @@ from fetchers import elevenst
 
 from . import llm_cache
 from . import price_table as price_table_module
+from .agents import gpt
 from .agents.base import build_recommend_prompt, build_refine_query_prompt, parse_json_object
 from .config import settings
 from .debate import (
@@ -219,8 +220,9 @@ class _FilterMergeNode(BaseAgent):
     """4단계 filter_merge - 관련성 필터(`_product_name_matches`) -> 0건이면
     임베딩 의미 유사도 구제(`semantic_relevance_fallback`, facet_answers가
     있을 때는 건너뜀 - 이미 구조적으로 필터링된 표본이라) -> 그래도 0건이면
-    HCX 표기 변형 재검색(`_search_with_query_variants`) -> 관련도순 임베딩
-    랭킹(`_rank_by_relevance`) 순서로 `debate.py`의
+    HCX 표기 변형 재검색(`_search_with_query_variants`) -> 액세서리 노이즈/
+    가격 이상치 제거(`filter_out_accessory_noise`/`filter_price_outliers`) ->
+    관련도순 임베딩 랭킹(`_rank_by_relevance`) 순서로 `debate.py`의
     `_search_and_rank_candidates`와 동일한 로직을 그대로 재사용한다. 끝까지
     관련 상품을 못 찾으면 RuntimeError를 그대로 던진다 - SequentialAgent는
     서브 에이전트 예외를 그대로 전체 실패로 전파하고, `run()`/`run_stream()`의
@@ -244,6 +246,29 @@ class _FilterMergeNode(BaseAgent):
             relevant = await _search_with_query_variants(query)
         if not relevant:
             raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다.")
+
+        # 2026-08-26 실측("아이폰 16/17" 데모 검증) - sortCd="H" 보정으로 본품을
+        # 찾아와도 원래 있던 액세서리가 후보 풀에 그대로 남거나, 정상가 대비
+        # 몇 배씩 튀는 이상치 가격 매물이 섞일 수 있다 - debate.py와 동일한
+        # 소프트 필터를 그대로 적용한다.
+        relevant = price_table_module.filter_out_accessory_noise(query, relevant)
+        relevant = price_table_module.filter_price_outliers(relevant)
+
+        # 2026-08-26 실측(AI 상세검색 드릴다운 - 용량/색상 선택 후 최종
+        # 검색까지 갔는데도 중고폰 매물이 먼저 뜸) - debate.py의
+        # _search_and_rank_candidates와 같은 이유·같은 트리거로 여기서도
+        # 구제한다(드릴다운은 sortCd="H" 보정을 안 타는 base_query 경로를
+        # 씀).
+        if price_table_module.all_candidates_look_like_used_condition(query, relevant):
+            high_price_items = await elevenst.search_elevenst(
+                query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT, sort_cd="H"
+            )
+            high_relevant = [
+                it for it in high_price_items if price_table_module._product_name_matches(query, it["product_name"])
+            ]
+            merged = price_table_module._dedupe_by_product_code(relevant + high_relevant)
+            relevant = price_table_module.filter_out_accessory_noise(query, merged)
+            relevant = price_table_module.filter_price_outliers(relevant)
 
         ranked = await _rank_by_relevance(query, relevant)
         yield Event(author=self.name, actions=EventActions(state_delta={"ranked_items": ranked}))
@@ -300,18 +325,22 @@ def _parse_challenge_result(raw: Any) -> dict:
 
 
 def _apply_challenge_verdicts(
-    ranked: list[elevenst.ElevenstSearchItem], challenge_result: dict
+    ranked: list[elevenst.ElevenstSearchItem], challenge_result: dict, notes: dict[int, str] | None = None
 ) -> list[dict]:
     """7단계 apply_challenge의 핵심 로직(순수 함수) - challenge(DeepSeek)
     검증 결과를 `_build_proposals`가 만든 Proposal 목록에 index 기준으로
     덧씌운다(`verified`/`challenge_note`). challenge가 다루지 않은(상위
     _MAX_CHALLENGE_CANDIDATES 밖) 후보는 verified=None(미검증)으로 남는다 -
     "검증 안 됨"이지 "검증 실패"가 아니므로 judge 단계에서 배제하지 않는다.
-    ADK Event/state_delta는 dict만 담을 수 있어 Proposal.model_dump() 결과를
-    반환한다."""
+    notes(gpt.candidate_notes 결과, 2026-08-26 추가)는 `_build_proposals`에
+    그대로 전달해 각 Proposal의 reasoning을 채운다 - 이걸 안 넘기면(예전
+    코드처럼 {}를 넘기면) 모든 "다른 후보"가 똑같은 고정 문구("11번가 오픈
+    API 검증 결과...")만 달게 된다(사용자 리포트 - "제품마다 추천이유
+    만들도록 시켰었잖아"). ADK Event/state_delta는 dict만 담을 수 있어
+    Proposal.model_dump() 결과를 반환한다."""
     verdicts_by_index = {v["index"]: v for v in challenge_result.get("verdicts") or []}
 
-    proposals = _build_proposals(ranked, {})
+    proposals = _build_proposals(ranked, notes or {})
     updated = []
     for i, proposal in enumerate(proposals):
         verdict = verdicts_by_index.get(i)
@@ -326,12 +355,23 @@ def _apply_challenge_verdicts(
 
 class _ApplyChallengeNode(BaseAgent):
     """7단계 apply_challenge - 로직은 `_apply_challenge_verdicts`(순수 함수)에
-    있고, 이 노드는 세션 상태를 읽고/쓰는 얇은 ADK 래퍼일 뿐이다."""
+    있고, 이 노드는 세션 상태를 읽고/쓰는 얇은 ADK 래퍼다. challenge와
+    직접적인 의존 관계는 없지만(같은 ranked_items만 입력으로 씀) 별도
+    ParallelAgent로 안 빼고 여기서 순차 호출한다 - LlmAgent가 아닌 일반
+    노드 안에서 부르는 게 SequentialAgent 구조를 그대로 유지하면서 가장
+    간단하다(_MAX_CHALLENGE_CANDIDATES=5로 제한해 지연을 최소화)."""
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        ranked = ctx.session.state.get("ranked_items") or []
-        challenge_result = _parse_challenge_result(ctx.session.state.get("challenge_result"))
-        proposals = _apply_challenge_verdicts(ranked, challenge_result)
+        state = ctx.session.state
+        query = _resolved_query(state)
+        ranked = state.get("ranked_items") or []
+        challenge_result = _parse_challenge_result(state.get("challenge_result"))
+        # settings.rule_based_mode(데모 녹화 전용) - candidate_notes도 Qwen
+        # 호출이라 건너뛴다. notes={}는 candidate_notes가 실패했을 때와 같은
+        # 입력이라 _apply_challenge_verdicts/_build_proposals가 이미 안전하게
+        # 처리한다(일반 문구로 대체).
+        notes = {} if state.get("rule_based") else await gpt.candidate_notes(query, ranked)
+        proposals = _apply_challenge_verdicts(ranked, challenge_result, notes)
         yield Event(author=self.name, actions=EventActions(state_delta={"proposals": proposals}))
 
 
@@ -345,6 +385,17 @@ def _skip_refine_if_already_specific(callback_context, llm_request) -> LlmRespon
         fallback = RefinedQuery(query=original_query)
         return _model_error_fallback_response(fallback.model_dump_json())
     return None
+
+
+def _skip_refine_if_rule_based(callback_context, llm_request) -> LlmResponse | None:
+    """settings.rule_based_mode(데모 녹화 전용) - 켜져 있으면 정제 없이
+    원본 질의 그대로 진행한다. _on_refine_error와 폴백 형태가 같다(모델
+    실패 시와 똑같이 취급) - 새 동작을 만드는 게 아니라 기존 폴백을
+    미리(호출 자체를 안 하고) 타게 하는 것뿐이다."""
+    if not callback_context.state.get("rule_based"):
+        return None
+    original_query = callback_context.state.get("original_query", "")
+    return _model_error_fallback_response(RefinedQuery(query=original_query).model_dump_json())
 
 
 def _on_refine_error(callback_context, llm_request, error) -> LlmResponse | None:
@@ -405,10 +456,18 @@ def _build_refine_agent() -> LlmAgent:
         instruction=instruction,
         output_schema=RefinedQuery,
         output_key="refine_result",
-        before_model_callback=[_skip_refine_if_already_specific, _refine_cache_lookup],
+        before_model_callback=[_skip_refine_if_rule_based, _skip_refine_if_already_specific, _refine_cache_lookup],
         after_model_callback=_refine_cache_store,
         on_model_error_callback=_on_refine_error,
     )
+
+
+def _skip_challenge_if_rule_based(callback_context, llm_request) -> LlmResponse | None:
+    """settings.rule_based_mode(데모 녹화 전용) - _on_challenge_error와 같은
+    폴백(빈 verdicts, 전부 미검증)을 호출 전에 미리 돌려준다."""
+    if not callback_context.state.get("rule_based"):
+        return None
+    return _model_error_fallback_response(_ChallengeResult(verdicts=[]).model_dump_json())
 
 
 def _on_challenge_error(callback_context, llm_request, error) -> LlmResponse | None:
@@ -468,10 +527,19 @@ def _build_challenge_agent() -> LlmAgent:
         ),
         instruction=instruction,
         output_key="challenge_result",
-        before_model_callback=_challenge_cache_lookup,
+        before_model_callback=[_skip_challenge_if_rule_based, _challenge_cache_lookup],
         after_model_callback=_challenge_cache_store,
         on_model_error_callback=_on_challenge_error,
     )
+
+
+def _skip_judge_if_rule_based(callback_context, llm_request) -> LlmResponse | None:
+    """settings.rule_based_mode(데모 녹화 전용) - _on_judge_error와 같은
+    -1 센티널을 호출 전에 미리 돌려준다 - run()/run_stream()이 이걸
+    "판단 없음"으로 읽어 _build_decision의 최저가 규칙 폴백을 탄다."""
+    if not callback_context.state.get("rule_based"):
+        return None
+    return _model_error_fallback_response(_JudgeVerdict(index=-1, reasoning="").model_dump_json())
 
 
 def _on_judge_error(callback_context, llm_request, error) -> LlmResponse | None:
@@ -528,7 +596,7 @@ def _build_judge_agent() -> LlmAgent:
         instruction=instruction,
         output_schema=_JudgeVerdict,
         output_key="judge_result",
-        before_model_callback=_judge_cache_lookup,
+        before_model_callback=[_skip_judge_if_rule_based, _judge_cache_lookup],
         after_model_callback=_judge_cache_store,
         on_model_error_callback=_on_judge_error,
     )
@@ -598,6 +666,7 @@ async def _run_pipeline_once(
             "base_query": base_query,
             "facet_answers": facet_answers,
             "force_price_rescue": force_price_rescue,
+            "rule_based": settings.rule_based_mode,
         },
     )
 
@@ -667,7 +736,7 @@ async def run_stream(
         yield {"type": "error", "message": f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다."}
         return
 
-    decision = _build_decision(ranked, _judge_recommended(state))
+    decision = _build_decision(ranked, _judge_recommended(state), rule_based=bool(state.get("rule_based")))
     result = DecideResponse(
         query=state.get("resolved_query", query),
         proposals=proposals_raw,

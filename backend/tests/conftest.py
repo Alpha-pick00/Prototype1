@@ -65,3 +65,19 @@ def block_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", _guarded_connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo)
+
+
+# PART B - settings.rule_based_mode(2026-08-26, 데모 녹화용 .env 스위치)를
+# 끈 채로 스위트를 고정한다. app.config.Settings는 다른 설정들과 같은
+# 패턴으로 클래스 정의 시점에 os.environ을 한 번만 읽는데, 개발자가 데모
+# 녹화 중 backend/.env에 RULE_BASED_MODE=true를 남겨두면 pytest도 그 값을
+# 그대로 물려받아 "DeepSeek을 실제로 부르는지" 검증하는 테스트 11개가
+# 전부(원인과 무관하게) 깨지는 걸 실측으로 확인했다 - 로컬 .env 상태가
+# 테스트 결과를 좌우하면 안 되므로, block_network와 같은 이유로 여기서
+# 강제로 고정한다. rule_based_mode 자체를 검증하는 테스트는 개별적으로
+# monkeypatch.setattr(settings, "rule_based_mode", True)로 켠다.
+@pytest.fixture(autouse=True)
+def rule_based_mode_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "rule_based_mode", False)

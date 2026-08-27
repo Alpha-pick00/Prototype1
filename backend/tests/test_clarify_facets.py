@@ -10,7 +10,9 @@ import asyncio
 from fastapi.testclient import TestClient
 
 from app.debate import (
+    _dedupe_similar_facet_options,
     _enrich_facets_per_brand,
+    _extract_facets_rule_based,
     _MAX_BRAND_ENRICH_FANOUT,
     _strip_query_answered_options,
     check_clarify_facets,
@@ -34,9 +36,22 @@ def test_needs_clarification_true_for_two_word_bare_query():
     assert needs_clarification("과자 선물") is True
 
 
-def test_needs_clarification_false_for_query_with_digit():
-    # "테스트 상품 15" 처럼 숫자가 섞이면 이미 구체적인 스펙 검색으로 본다.
-    assert needs_clarification("아이폰 15") is False
+def test_needs_clarification_true_for_bare_model_generation_number():
+    """실측(2026-08-26 사용자 리포트, "'아이폰 16'만 쳤을 때 HITL이 안 뜸") -
+    "아이폰 15/16"의 숫자는 용량·색상 단위가 안 붙은 모델 세대 번호일
+    뿐이라, 여전히 애매한 질의로 봐야 한다. 원래는 "숫자가 하나라도 있으면
+    이미 구체적"으로 뭉뚱그려 판단해 이런 케이스까지 clarify를 건너뛰게
+    만들었다(회귀 방지용 - 예전엔 이 테스트가 반대로 False를 기대했다)."""
+    assert needs_clarification("아이폰 15") is True
+    assert needs_clarification("아이폰 16") is True
+    assert needs_clarification("갤럭시 S25") is True
+
+
+def test_needs_clarification_false_for_query_with_real_spec_unit():
+    # "노트북 256GB"/"생수 500ml"처럼 용량·크기 단위가 숫자에 붙어있으면
+    # 진짜 스펙이 정해진 것으로 본다 - 모델 세대 번호와는 다르다.
+    assert needs_clarification("노트북 256GB") is False
+    assert needs_clarification("생수 500ml") is False
 
 
 def test_needs_clarification_false_for_long_specific_query():
@@ -535,6 +550,49 @@ def test_extract_facets_from_names_drops_value_that_is_substring_of_another_in_s
     assert len(facets) == 1
     assert "방수" not in facets[0].options
     assert set(facets[0].options) == {"생활방수", "카드수납"}
+
+
+def test_dedupe_similar_facet_options_merges_typo_variants_of_same_color():
+    """실측(2026-08-26, "아이폰 16" AI 상세검색) - all_candidates_look_like_
+    accessories 구제(sortCd="H")가 자급제 재판매 리스팅을 섞어 넣으면서
+    같은 "내추럴 티타늄" 색상이 판매자마다 "내추럴티타늄"/"네추럴티타늄"/
+    "내츄럴티타늄"으로 다르게 표기돼 색상 facet에 6개(실제로는 4개)로
+    쪼개져 떴다. 가장 흔한 표기(원본 상품명에 가장 많이 등장하는 것)를
+    대표값으로 남기고 나머지는 합쳐져야 한다."""
+    facets = [
+        ClarifyFacet(
+            label="색상",
+            options=["화이트티타늄", "블랙티타늄", "내추럴티타늄", "데저트티타늄", "네추럴티타늄", "내츄럴티타늄"],
+        )
+    ]
+    names = (
+        ["아이폰 16 프로 256GB 화이트티타늄"]
+        + ["아이폰 16 프로 256GB 블랙티타늄"]
+        + ["아이폰 16 프로 256GB 내추럴티타늄"] * 3
+        + ["아이폰 16 프로 256GB 데저트티타늄"]
+        + ["아이폰 16 프로 256GB 네추럴티타늄"]
+        + ["아이폰 16 프로 256GB 내츄럴티타늄"]
+    )
+
+    deduped = _dedupe_similar_facet_options(facets, names)
+
+    assert len(deduped) == 1
+    assert set(deduped[0].options) == {"화이트티타늄", "블랙티타늄", "내추럴티타늄", "데저트티타늄"}
+    assert "네추럴티타늄" not in deduped[0].options
+    assert "내츄럴티타늄" not in deduped[0].options
+
+
+def test_dedupe_similar_facet_options_does_not_merge_different_capacities():
+    """실측(위와 같은 조사 도중 발견) - "512GB"/"128GB"는 숫자 두 자리가
+    다를 뿐인데 rapidfuzz.fuzz.ratio가 우연히 오탈자 임계값과 같은 80.0이
+    나와, 색상용 병합 로직을 그대로 적용하면 서로 다른 용량이 하나로
+    합쳐져 버린다. 숫자가 섞인 값은 병합 대상에서 제외해야 한다."""
+    facets = [ClarifyFacet(label="용량", options=["1TB", "512GB", "256GB", "128GB"])]
+    names = ["아이폰 16 프로 256GB"]
+
+    deduped = _dedupe_similar_facet_options(facets, names)
+
+    assert deduped[0].options == ["1TB", "512GB", "256GB", "128GB"]
 
 
 def test_extract_facets_from_names_filters_out_phone_models_older_than_2020(monkeypatch):
@@ -1455,3 +1513,81 @@ def test_run_elevenst_only_debate_stream_never_calls_deepseek_facets_even_for_sh
         {"type": "status", "stage": "searching"},
         {"type": "error", "message": "11번가에서 '음료수'에 대해 관련성 있는 상품을 찾지 못했습니다."},
     ]
+
+
+def test_extract_facets_rule_based_finds_model_capacity_and_color_without_any_llm_call():
+    """settings.rule_based_mode(2026-08-26, "데모용으로 규칙 기반으로 좀
+    빠르게") 전용 경로 - DeepSeek 호출 없이 실측과 같은 모양의 상품명
+    목록에서 모델/용량/색상 세 축을 뽑아야 한다."""
+    names = [
+        "Apple 아이폰 16 프로 맥스 256GB [자급제]",
+        "Apple 아이폰 16 프로 256GB [자급제] 데저트 티타늄",
+        "Apple 아이폰 16 프로 맥스 256GB 블랙 티타늄 [자급제]",
+        "Apple 아이폰 16 프로 맥스 256GB 내추럴 티타늄 [자급제]",
+        "Apple 아이폰 16 프로 256GB [자급제] 블랙티타늄",
+        "Apple 아이폰 16 256GB [자급제] 화이트 VO",
+        "Apple 아이폰 16 512GB [자급제] 화이트",
+        "Apple 아이폰 16 128GB [자급제] 블랙",
+        "Apple 아이폰 16 1TB [자급제] 화이트",
+    ]
+
+    facets = _extract_facets_rule_based(names)
+
+    by_label = {f.label: set(f.options) for f in facets}
+    assert by_label["모델"] == {"프로 맥스", "프로", "일반"}
+    assert by_label["용량"] == {"1TB", "512GB", "256GB", "128GB"}
+    assert {"데저트티타늄", "블랙티타늄", "내추럴티타늄", "화이트", "블랙"} <= by_label["색상"]
+
+
+def test_extract_facets_rule_based_drops_axis_with_only_one_distinct_value():
+    """전부 128GB면 "용량"을 물어봐도 좁혀줄 게 없으니 축 자체를 버려야
+    한다(deepseek.extract_facets_from_names의 기존 규칙과 동일)."""
+    names = ["Apple 아이폰 16 128GB 화이트", "Apple 아이폰 16 128GB 블랙"]
+
+    facets = _extract_facets_rule_based(names)
+
+    assert "용량" not in {f.label for f in facets}
+
+
+def test_check_clarify_facets_uses_rule_based_extraction_when_enabled(monkeypatch):
+    """settings.rule_based_mode가 켜져 있으면 check_clarify_facets가
+    deepseek.extract_facets_from_names(LLM 호출)를 아예 안 불러야 한다."""
+    from app import debate
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "rule_based_mode", True)
+
+    async def _boom(query, names):
+        raise AssertionError("rule_based_mode에서는 deepseek.extract_facets_from_names를 부르면 안 된다")
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _boom)
+
+    async def _search_elevenst_items(query, limit=10, sort_cd="A"):
+        return [
+            {
+                "product_code": "1",
+                "product_name": "Apple 아이폰 16 256GB 화이트",
+                "price_krw": 1_000_000,
+                "seller": "판매자",
+                "url": "https://www.11st.co.kr/products/1",
+                "review_count": None,
+                "buy_satisfy": None,
+                "image_url": None,
+            },
+            {
+                "product_code": "2",
+                "product_name": "Apple 아이폰 16 512GB 블랙",
+                "price_krw": 1_200_000,
+                "seller": "판매자",
+                "url": "https://www.11st.co.kr/products/2",
+                "review_count": None,
+                "buy_satisfy": None,
+                "image_url": None,
+            },
+        ]
+
+    monkeypatch.setattr(debate.price_table_module, "_search_elevenst_items", _search_elevenst_items)
+
+    result = asyncio.run(check_clarify_facets("아이폰 16"))
+
+    assert {f.label for f in result.options.facets} == {"용량", "색상"}

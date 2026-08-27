@@ -3,6 +3,8 @@ import logging
 import re
 from typing import Any, AsyncIterator
 
+from rapidfuzz import fuzz
+
 from fetchers import elevenst
 
 from . import embeddings
@@ -10,6 +12,7 @@ from . import facet_cache
 from . import llm_cache
 from . import price_table as price_table_module
 from .agents import deepseek, gpt, hcx
+from .config import settings
 from .intent import extract_price_range, is_non_product_chitchat, looks_conversational_query, needs_clarification
 from .schemas import (
     ClarifyFacet,
@@ -76,6 +79,27 @@ async def _search_candidates(
     돈다 - 단어 목록이 못 잡는 케이스까지 결국 걸러내는 두 번째 안전망."""
     if base_query and base_query.strip() and base_query.strip() != query.strip():
         items = await elevenst.search_elevenst(base_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT)
+        # 2026-08-26 실측("아이폰 16 256GB" 드릴다운 - 그 순간 추천도순 90개
+        # 표본이 거의 전부 한 판매자의 액정보호필름이었다) - 액세서리 노이즈를
+        # 먼저 걷어내지 않고 바로 "256GB" 문자열 매칭을 하면, 매칭되는 게
+        # MIN_FILTERED_CLARIFY_ITEMS(3개) 미만이라 그 안전장치가 필터링 자체를
+        # 포기해버리고 액세서리로 가득한 원본 90개를 그대로 돌려준다 - 안전장치가
+        # 오히려 최악의 표본을 확정시키는 역효과. 먼저 액세서리를 걷어낸
+        # 표본에서 "256GB" 매칭을 시도해야, 진짜 본품 매물 중에서 그 조건을
+        # 만족하는지를 정확히 판단할 수 있다.
+        #
+        # 그런데 표본 90개가 "전부"(100%) 액세서리면(위 실측이 정확히 이
+        # 경우였다) filter_out_accessory_noise는 소프트 필터라 걸러내고 나면
+        # 0개가 되어 원본을 그대로 돌려준다 - 필터가 아예 무력화된다. 단발
+        # 질의 분기(아래)의 all_candidates_look_like_accessories + sortCd="H"
+        # 보정과 같은 논리로, base_query 표본 자체가 전부 액세서리일 때도
+        # 여기서 먼저 구제해야 한다.
+        if price_table_module.all_candidates_look_like_accessories(base_query, items):
+            high_price_items = await elevenst.search_elevenst(
+                base_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT, sort_cd="H"
+            )
+            items = price_table_module._dedupe_by_product_code(items + high_price_items)
+        items = price_table_module.filter_out_accessory_noise(base_query, items)
         if facet_answers:
             return _filter_items_by_facet_answers(items, facet_answers)
         return _filter_items_by_extra_terms(items, query, base_query)
@@ -212,6 +236,32 @@ async def _search_and_rank_candidates(
     if not relevant:
         raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했습니다.")
 
+    # 2026-08-26 실측("아이폰 16/17" 데모 검증) - 관련성 필터를 통과해도
+    # 액세서리(케이스 등)가 섞여 있거나(sortCd=H 보정으로 본품을 찾아와도
+    # 원래 있던 액세서리가 후보 풀에 그대로 남음), 정상가 대비 몇 배씩 튀는
+    # 이상치 가격 매물이 섞일 수 있다 - 둘 다 소프트 필터라 전부 걸러지면
+    # 원래 목록을 그대로 쓴다.
+    relevant = price_table_module.filter_out_accessory_noise(query, relevant)
+    relevant = price_table_module.filter_price_outliers(relevant)
+
+    # 2026-08-26 실측(AI 상세검색 드릴다운 - "아이폰 16" -> 용량/색상 선택 후
+    # 최종 검색까지 갔는데도 중고폰 매물이 먼저 뜸) - facet_answers/base_query
+    # 드릴다운 경로는 _search_candidates 안에서 base_query로 90개(추천도순)를
+    # 가져와 로컬 필터링만 하지, all_candidates_look_like_accessories류
+    # sortCd="H" 보정을 안 탄다(그건 단발 질의 분기에만 있다). 그래서 신품이
+    # 표본에 거의 없는 채로 여기까지 왔을 수 있다 - check_clarify_facets와
+    # 같은 트리거로 여기서도 구제한다.
+    if price_table_module.all_candidates_look_like_used_condition(query, relevant):
+        high_price_items = await elevenst.search_elevenst(
+            query, limit=price_table_module.SINGLE_QUERY_SEARCH_LIMIT, sort_cd="H"
+        )
+        high_relevant = [
+            it for it in high_price_items if price_table_module._product_name_matches(query, it["product_name"])
+        ]
+        merged = price_table_module._dedupe_by_product_code(relevant + high_relevant)
+        relevant = price_table_module.filter_out_accessory_noise(query, merged)
+        relevant = price_table_module.filter_price_outliers(relevant)
+
     if price_min is None and price_max is None:
         return query, await _rank_by_relevance(query, relevant), None
 
@@ -228,10 +278,17 @@ async def _search_and_rank_candidates(
 
 
 def _build_decision(
-    ranked: list[elevenst.ElevenstSearchItem], recommended: tuple[int, str] | None
+    ranked: list[elevenst.ElevenstSearchItem], recommended: tuple[int, str] | None, rule_based: bool = False
 ) -> Decision:
     """추천 Agent(gpt.recommend_best) 결과로 최종 추천(Decision)을 만든다.
-    실패하면(키 없음·API 오류) 최저가 규칙 기반으로 폴백한다."""
+    실패하면(키 없음·API 오류) 최저가 규칙 기반으로 폴백한다.
+
+    rule_based(2026-08-26, settings.rule_based_mode 데모 녹화 스위치) -
+    adk_pipeline이 judge 호출 자체를 의도적으로 건너뛰어도 _judge_recommended가
+    똑같이 None을 돌려주므로(judge_result가 진짜 실패했을 때와 구분이 안 됨)
+    이 인자가 없으면 사유 문구가 "추천 Agent 응답 실패로"라고 떠서 촬영
+    화면에 에러처럼 보인다 - 의도적으로 규칙 기반을 쓴 경우엔 실패 언급 없는
+    문구를 쓴다."""
     if recommended is not None:
         index, llm_reasoning = recommended
         best = ranked[index]
@@ -249,7 +306,11 @@ def _build_decision(
         )
     else:
         best = min(ranked, key=lambda it: it["price_krw"])
-        reasoning = "11번가 오픈 API(ProductSearch) 실측 - 추천 Agent 응답 실패로 최저가 규칙 기반 선택"
+        reasoning = (
+            "11번가 오픈 API(ProductSearch) 실측 - 최저가 규칙 기반으로 선택"
+            if rule_based
+            else "11번가 오픈 API(ProductSearch) 실측 - 추천 Agent 응답 실패로 최저가 규칙 기반 선택"
+        )
 
     return Decision(
         product_name=best["product_name"],
@@ -663,6 +724,70 @@ def _build_facet_value_incidence(facets: list[ClarifyFacet], names: list[str]) -
     return incidence
 
 
+# 2026-08-26 실측("아이폰 16" 색상 facet에 "내추럴티타늄"/"네추럴티타늄"/
+# "내츄럴티타늄"이 서로 다른 값처럼 나란히 뜸) - all_candidates_look_like_
+# accessories/all_candidates_look_like_used_condition 구제(sortCd="H")가
+# 자급제 재판매 리스팅을 섞어 넣는데, 판매자마다 같은 색상을 오탈자 수준으로
+# 다르게 표기해서 DeepSeek이 그대로 서로 다른 값으로 뽑아온다. 임계값 80은
+# 오탈자 1글자 차이 쌍(rapidfuzz.fuzz.ratio 83.3)을 잡으려고 정했는데,
+# 실측해보니 "512GB"/"128GB"처럼 실제로 다른 용량 값도 우연히 80.0이 나와
+# 잘못 합쳐질 뻔했다(숫자는 한 글자 차이가 곧 의미가 통째로 달라지는데,
+# 문자열 유사도는 그걸 모른다) - 그래서 숫자가 섞인 값은 애초에 이 병합
+# 대상에서 제외한다(용량 표기는 판매자마다 오탈자가 날 일도 거의 없어 병합
+# 실익도 작다). 색상/재질처럼 숫자 없는 순수 텍스트 값에만 적용된다.
+_FACET_VALUE_DUPLICATE_RATIO = 80
+
+
+def _dedupe_similar_facet_options(facets: list[ClarifyFacet], names: list[str]) -> list[ClarifyFacet]:
+    """오탈자 수준 근접 문자열을 같은 값으로 묶는다(위 실측 참고) - union-find로
+    같은 facet 안 옵션 전체 쌍을 보고 묶어서, "내추럴티타늄"이 없고 "네추럴"/
+    "내츄럴"만 있어도(어느 한쪽이 다른 한쪽과만 직접 유사해도) 전이적으로
+    같은 그룹이 된다. 묶인 그룹에서는 원본 상품명에 가장 많이 등장하는
+    표기를 대표값으로 남긴다 - 가장 흔한 표기가 사실상 "정식" 표기일
+    가능성이 높다. _attach_facet_crossfilter/incidence가 이 결과를 그대로
+    쓰므로, 그 전에(옵션이 확정된 뒤) 한 번만 돌면 된다."""
+    normalized_names = [_normalize_for_match(name) for name in names]
+
+    def _count(option: str) -> int:
+        key = _normalize_for_match(option)
+        return sum(1 for n in normalized_names if key in n)
+
+    deduped: list[ClarifyFacet] = []
+    for facet in facets:
+        options = facet.options
+        normed = [_normalize_for_match(o) for o in options]
+        has_digit = [any(ch.isdigit() for ch in n) for n in normed]
+        parent = list(range(len(options)))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i in range(len(options)):
+            for j in range(i + 1, len(options)):
+                if has_digit[i] or has_digit[j]:
+                    continue
+                if fuzz.ratio(normed[i], normed[j]) >= _FACET_VALUE_DUPLICATE_RATIO:
+                    ri, rj = find(i), find(j)
+                    if ri != rj:
+                        parent[ri] = rj
+
+        groups: dict[int, list[int]] = {}
+        for i in range(len(options)):
+            groups.setdefault(find(i), []).append(i)
+        group_order = sorted(groups, key=lambda root: min(groups[root]))
+        canonical_options = [
+            options[max(groups[root], key=lambda i: _count(options[i]))] for root in group_order
+        ]
+
+        deduped.append(
+            facet if canonical_options == options else facet.model_copy(update={"options": canonical_options})
+        )
+    return deduped
+
+
 def _attach_facet_crossfilter(facets: list[ClarifyFacet], names: list[str]) -> list[ClarifyFacet]:
     """facet 쌍 전부(브랜드 한정이 아니다) 사이의 연관을 상품명에서 직접 계산해
     붙인다(사용자 요청, 2026-08-13: "삼성전자를 누르면 시리즈에 삼성전자에 관한것만"
@@ -783,6 +908,63 @@ def _apply_persona_ordering(facets: list[ClarifyFacet], persona: dict[str, str])
 
 _FACET_CACHE_NAMESPACE = "clarify_facets"
 
+# settings.rule_based_mode(2026-08-26, "데모용으로 규칙 기반으로 좀
+# 빠르게") 전용 - DeepSeek 호출(_extract_facets) 없이 상품명 텍스트에서
+# 정규식/키워드만으로 뽑는 facet 축. 폰/전자기기류 스펙(모델 변형·용량·
+# 색상)만 다루는 좁은 규칙이다 - DeepSeek처럼 임의 카테고리를 일반적으로
+# 다루지는 못하지만(예: "텀블러"의 "보온시간" 같은 축은 못 잡는다), 그만큼
+# API 호출이 0번이라 빠르고 매 촬영 테이크마다 같은 결과를 낸다. 실측
+# 데이터(아이폰 16 시리즈)에서 확인한 값만 넣었다 - 새 제품군 색상 이름이
+# 늘면 여기 목록도 같이 늘려야 한다(DeepSeek 경로는 이 한계가 없다).
+_CAPACITY_PATTERN = re.compile(r"\d+\s*(?:GB|TB)", re.IGNORECASE)
+_MODEL_VARIANT_KEYWORDS = ["프로 맥스", "프로맥스", "울트라", "플러스", "미니", "프로", "에어"]
+_COLOR_WORD_PATTERN = re.compile(
+    r"(?:내추럴|데저트|화이트|블랙|실버|골드|그레이|네이비|레드|블루|그린|퍼플|핑크|"
+    r"옐로우|오렌지|브론즈|브라운|베이지|민트|틸|울트라마린|라벤더)\s?(?:티타늄|티타니움)?"
+)
+
+
+def _normalize_capacity_token(raw: str) -> str:
+    match = re.match(r"(\d+)\s*(GB|TB)", raw, re.IGNORECASE)
+    return f"{match.group(1)}{match.group(2).upper()}"
+
+
+def _capacity_value_gb(token: str) -> float:
+    return float(re.sub(r"[^\d.]", "", token)) * (1024 if token.upper().endswith("TB") else 1)
+
+
+def _extract_facets_rule_based(names: list[str]) -> list[ClarifyFacet]:
+    """_extract_facets의 규칙 기반 대체 경로(위 모듈 상수 설명 참고) -
+    같은 후처리(_dedupe_similar_facet_options/_attach_facet_crossfilter/
+    incidence 정렬)를 그대로 태워서, 호출부(check_clarify_facets) 입장에서
+    반환 형태가 완전히 같다. deepseek.extract_facets_from_names와 같은
+    규칙으로 값이 1개뿐인 축은 버린다(구분이 안 되는 선택지라 의미가 없다)."""
+    capacities = sorted(
+        {_normalize_capacity_token(m.group(0)) for name in names for m in _CAPACITY_PATTERN.finditer(name)},
+        key=_capacity_value_gb,
+        reverse=True,
+    )
+    variants = [
+        next((kw for kw in _MODEL_VARIANT_KEYWORDS if kw in name), "일반").replace("프로맥스", "프로 맥스")
+        for name in names
+    ]
+    colors = sorted(
+        {re.sub(r"\s+", "", m.group(0)) for name in names for m in _COLOR_WORD_PATTERN.finditer(name)}
+    )
+
+    facets = []
+    if len(set(variants)) >= 2:
+        facets.append(ClarifyFacet(label="모델", options=list(dict.fromkeys(variants))))
+    if len(capacities) >= 2:
+        facets.append(ClarifyFacet(label="용량", options=capacities))
+    if len(colors) >= 2:
+        facets.append(ClarifyFacet(label="색상", options=colors))
+
+    facets = _dedupe_similar_facet_options(facets, names)
+    facets = _attach_facet_crossfilter(facets, names)
+    incidence = _build_facet_value_incidence(facets, names)
+    return sorted(facets, key=lambda f: _facet_sort_key(f, incidence))
+
 
 async def _extract_facets(
     query: str, names: list[str], persona: dict[str, str] | None = None
@@ -802,6 +984,7 @@ async def _extract_facets(
         facets = await deepseek.extract_facets_from_names(query, names)
         facets = await _enrich_facets_per_brand(facets, names, query)
         facets = await _enrich_device_models_by_ecosystem(facets, names, query)
+        facets = _dedupe_similar_facet_options(facets, names)
         facets = _attach_facet_crossfilter(facets, names)
         incidence = _build_facet_value_incidence(facets, names)
         facets = sorted(facets, key=lambda f: _facet_sort_key(f, incidence))
@@ -924,6 +1107,47 @@ async def check_clarify_facets(
         search_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT
     )
 
+    # 2026-08-26 실측("아이폰 16" AI 상세검색 - 색상/용량이 아니라 "제품분류
+    # (케이스/거치대)"·"부가기능(맥세이프/무선충전)"·"패턴(클리어/빈티지)"처럼
+    # 액세서리 축만 나왔다) - 이 함수는 run_elevenst_only_debate*와 완전히
+    # 별도 검색 경로라 그쪽에 넣은 _product_name_matches/filter_out_accessory_
+    # noise를 안 거친다. "추천도순" 표본 90개 중 81개가 액세서리였던 걸 확인
+    # (실측) - facet 추출용 표본이 액세서리로 도배되면 DeepSeek이 그 표본에
+    # 있는 축만 뽑아낼 수밖에 없다. 관련성 필터(_product_name_matches)까지
+    # 걸면 표본이 과하게 좁아질 수 있어(여긴 정확한 그라운딩이 아니라 facet
+    # 다양성이 목적) 액세서리 노이즈 제거만 적용한다.
+    items = price_table_module.filter_out_accessory_noise(query, items)
+
+    # 2026-08-26 실측("아이폰 16 256GB" 드릴다운 조사 중 발견 - 그 순간
+    # 추천도순 90개 표본이 한 판매자의 액정보호필름으로 전부 도배돼 있었다) -
+    # filter_out_accessory_noise는 소프트 필터라 걸러내고 나면 하나도 안
+    # 남으면(표본 전체가 액세서리) 원래 목록을 그대로 돌려준다 - 필터가
+    # 무력화된다. "전부 액세서리인지"는 all_candidates_look_like_accessories로
+    # 따로 판정해서, 그럴 때만 _search_candidates 단발 질의 분기와 같은
+    # sortCd="H" 보정으로 본품을 섞어 넣는다.
+    if price_table_module.all_candidates_look_like_accessories(query, items):
+        high_price_items = await price_table_module._search_elevenst_items(
+            search_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT, sort_cd="H"
+        )
+        merged = price_table_module._dedupe_by_product_code(items + high_price_items)
+        items = price_table_module.filter_out_accessory_noise(query, merged)
+
+    # 2026-08-26 실측(위와 같은 "아이폰 16" 조사 - 액세서리를 걸러내고 남은
+    # 9개 표본이 전부 "S+등급 아이폰 16 프로 256 ... 중고폰 공기계"류 중고
+    # 매물이었다. 신품 매물은 추천도순 상위 90개 안에 아예 없었다) - 중고
+    # 매물은 용량을 "256GB"가 아니라 "256"처럼 단위 없이 쓰는 경우가 흔해서,
+    # 표본이 전부 중고면 "용량" facet 값에서 "GB" 단위 자체가 빠져버린다.
+    # _search_candidates의 sortCd="H" 보정과 같은 논리로, 액세서리 제거 후
+    # 남은 표본이 전부 중고면 높은가격순으로 한 번 더 검색해 신품 매물을
+    # 섞는다(추가 요청 1번, 이 트리거가 안 걸리면 지금처럼 A만 쓴다).
+    if price_table_module.all_candidates_look_like_used_condition(query, items):
+        high_price_items = await price_table_module._search_elevenst_items(
+            search_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT, sort_cd="H"
+        )
+        merged = price_table_module._dedupe_by_product_code(items + high_price_items)
+        items = price_table_module.filter_out_accessory_noise(query, merged)
+        items = price_table_module.filter_price_outliers(items)
+
     # 카테고리 축은 아예 다루지 않는다(2026-08-20, "제품분류가 굳이 필요해?" -
     # 실측 카테고리 집계를 Groq으로 자동 분류해봤지만 그 결과를 쓰는 곳이
     # 어디에도 없어 API 호출만 하나 느는 죽은 기능이었다). 11번가 오픈 API는
@@ -943,7 +1167,9 @@ async def check_clarify_facets(
             else _filter_items_by_extra_terms(items, query, base_query)
         )
     names = [item["product_name"] for item in items]
-    facets = await _extract_facets(query, names, persona)
+    facets = _extract_facets_rule_based(names) if settings.rule_based_mode else await _extract_facets(
+        query, names, persona
+    )
     facets = [f for f in facets if f.label != "카테고리"]
     facets = _strip_query_answered_options(query, facets)
     return ClarifyResponse(query=query, options=ClarifyOptions(facets=facets))

@@ -62,5 +62,16 @@ class Settings:
     # 실제 배포 시에는 반드시 .env에 고정값을 넣을 것 (예: python -c "import secrets; print(secrets.token_hex(32))").
     session_secret_key: str = os.environ.get("SESSION_SECRET_KEY") or secrets.token_hex(32)
 
+    # 데모 녹화 전용(2026-08-26, "데모 영상만 찍으면 되니깐 그냥 규칙
+    # 기반으로 만들어줄래") - true면 app.adk_pipeline의 refine/challenge/
+    # judge(Qwen/DeepSeek 호출 3곳)를 전부 건너뛰고, 이미 있던 "LLM 호출
+    # 실패 시" 규칙 기반 폴백(원본 질의 그대로 검색 / 검증 없이 통과 /
+    # 최저가 규칙으로 최종 선택)을 항상 타게 만든다. 11번가 실시간 검색
+    # 결과 자체는 그대로 실측 데이터다 - 결과를 지어내는 게 아니라 "고르는
+    # 방식"만 매번 같은 규칙으로 고정하는 것. 촬영 중 LLM 응답 지연이나
+    # 매 테이크 다른 문구가 나오는 걸 피하려는 임시 스위치라 기본값은
+    # False(꺼짐) - 녹화 끝나면 .env에서 다시 지우거나 false로 되돌릴 것.
+    rule_based_mode: bool = os.environ.get("RULE_BASED_MODE", "").strip().lower() in ("1", "true", "yes")
+
 
 settings = Settings()

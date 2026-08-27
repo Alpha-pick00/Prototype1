@@ -169,13 +169,23 @@ export class ApiError extends Error {}
 // 쓰는 메타데이터가 다르다") - intent.py::SHORT_QUERY_TOKEN_LIMIT과 함께 넓혀서
 // "삼성 냉장고 스탠드형"처럼 짧지만 구체성이 붙기 시작한 질의도 AI 상세검색
 // (카테고리별 동적 facet)을 먼저 시도하도록 한다.
-const HAS_DIGIT_PATTERN = /\d/;
+// 2026-08-26 - 예전엔 숫자가 하나라도 있으면 "이미 구체적"으로 보고 이
+// 프리필터를 건너뛰었는데, "아이폰 16"의 "16"은 용량/색상 단위가 안 붙은
+// 모델 세대 번호일 뿐이라 여전히 애매한 질의다(사용자 리포트 - "아이폰
+// 16"만 쳐도 AI 상세검색 없이 바로 결과로 직행함). backend/app/intent.py의
+// _SPEC_NUMBER_PATTERN과 정확히 같은 기준(개수·부피 단위 + GB/TB/인치/mm/
+// mAh 같은 진짜 스펙 단위가 숫자에 붙어있을 때만 "구체적"으로 봄)으로
+// 맞춘다 - 이 프론트 프리필터가 백엔드 판정이랑 어긋나면, 백엔드가
+// needs_clarification()으로 True를 줘도 프론트가 애초에 그 API를 안
+// 불러버려서 아무 소용이 없다.
+const SPEC_NUMBER_PATTERN =
+  /\d+\s*(개|병|팩|박스|세트|캔|봉지|포|장|권|벌|족|대|ml|ML|mL|L|리터|밀리리터|kg|KG|Kg|g|G|그램|킬로|GB|TB|MB|mAh|인치|mm)(?![a-zA-Z가-힣])/i;
 
 export function looksAmbiguous(query: string): boolean {
   const trimmed = query.trim();
   if (!trimmed) return false;
   const tokens = trimmed.split(/\s+/);
-  return tokens.length <= 4 && !HAS_DIGIT_PATTERN.test(trimmed);
+  return tokens.length <= 4 && !SPEC_NUMBER_PATTERN.test(trimmed);
 }
 
 // baseQuery(2026-08-13, "조금 더 빠르게" 요청) - 드릴다운 중(예: "핸드폰" ->

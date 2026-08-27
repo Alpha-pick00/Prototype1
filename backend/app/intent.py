@@ -42,12 +42,22 @@ def is_bulk_query(query: str) -> bool:
 # 스탠드형"처럼 짧지만 구체성이 붙기 시작한 질의까지 넓힌다 - 여전히 숫자(스펙)가
 # 있으면 제외되고, facet을 못 찾으면 원래 경로로 그대로 진행되므로 위험 없음.
 SHORT_QUERY_TOKEN_LIMIT = 4
-_HAS_DIGIT_PATTERN = re.compile(r"\d")
+
+# GB/TB(저장용량)·인치/mm(크기)·mAh(배터리)도 BULK_SPEC_PATTERN(개수·부피
+# 단위)과 마찬가지로 진짜 스펙을 못박는 단위다(2026-08-26, 사용자 리포트
+# "'아이폰 16'만 쳤을 때 HITL이 안 뜸") - "아이폰 16"의 "16"처럼 단위 없이
+# 숫자만 붙어있으면 모델 세대 번호일 뿐, 용량·색상 등은 여전히 안 정해진
+# 애매한 질의다. 원래는 "숫자가 하나라도 있으면 이미 구체적"으로 뭉뚱그려
+# 판단해서 이런 모델명 숫자까지 clarify를 건너뛰게 만들었다.
+_ELECTRONICS_SPEC_UNIT_PATTERN = re.compile(
+    r"\d+\s*(GB|TB|MB|mAh|인치|mm)(?![a-zA-Z가-힣])", re.IGNORECASE
+)
+_SPEC_NUMBER_PATTERN = re.compile(f"{BULK_SPEC_PATTERN.pattern}|{_ELECTRONICS_SPEC_UNIT_PATTERN.pattern}")
 
 
 def _is_short_bare_query(query: str) -> bool:
     tokens = query.strip().split()
-    return 0 < len(tokens) <= SHORT_QUERY_TOKEN_LIMIT and not _HAS_DIGIT_PATTERN.search(query)
+    return 0 < len(tokens) <= SHORT_QUERY_TOKEN_LIMIT and not _SPEC_NUMBER_PATTERN.search(query)
 
 
 def needs_clarification(query: str) -> bool:

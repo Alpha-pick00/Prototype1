@@ -35,12 +35,17 @@ CLARIFY_SEARCH_LIMIT = 90
 SINGLE_QUERY_SEARCH_LIMIT = 30
 
 
-async def _search_elevenst_items(query: str, limit: int) -> list[elevenst.ElevenstSearchItem]:
+async def _search_elevenst_items(
+    query: str, limit: int, sort_cd: str = "A"
+) -> list[elevenst.ElevenstSearchItem]:
     """app.debate.check_clarify_facets의 상품명 표본 출처 - 막히거나 실패해도
     예외를 던지지 않고 빈 리스트를 반환한다(호출자가 폴백을 따로 두지 않아도
-    되도록)."""
+    되도록). sort_cd가 기본값(A)이면 kwarg 자체를 안 넘긴다 - _search_candidates와
+    같은 이유로, 이 함수를 patch하는 기존 테스트 더블(sort_cd를 모르는 단순
+    (query, limit=10) 시그니처)이 깨지지 않게 하기 위함이다."""
     try:
-        return await elevenst.search_elevenst(query, limit=limit)
+        kwargs = {} if sort_cd == "A" else {"sort_cd": sort_cd}
+        return await elevenst.search_elevenst(query, limit=limit, **kwargs)
     except elevenst.ElevenstSearchBlocked:
         logger.warning("elevenst search blocked for query=%r", query)
         return []
@@ -114,6 +119,10 @@ _ACCESSORY_INDICATOR_TOKENS = {
     "충전기", "충전패드", "충전케이블", "케이블", "젠더", "어댑터",
     "이어폰", "이어버드", "헤드폰", "헤드셋", "이어훅", "이어팁",
     "스트랩", "고리", "범퍼", "젤리케이스", "하드케이스", "배터리",
+    # 2026-08-26 실측("아이폰 16 256GB" 드릴다운 - 추천도순 표본이 액정보호
+    # 필름 일색이었던 순간, 액세서리 제거 후 남은 2개마저 "셀카 스틱 삼각대"/
+    # "카메라렌즈 보호"였다) - 카메라·촬영 액세서리 쪽 커버리지 보강.
+    "삼각대", "셀카봉", "셀카스틱", "짐벌", "렌즈",
 }
 
 
@@ -128,6 +137,83 @@ def all_candidates_look_like_accessories(query: str, items: list[elevenst.Eleven
     if not items or _looks_like_accessory(query):
         return False
     return all(_looks_like_accessory(it["product_name"]) for it in items)
+
+
+# 2026-08-26 실측(AI 상세검색 "아이폰 16" - 액세서리를 걸러내고 나니 남은 9개
+# 표본이 전부 "S+등급 아이폰 16 프로 256 ... 중고폰 공기계"류 중고 매물이었다.
+# 신품 매물은 "추천도순" 상위 90개 안에 아예 없었다 - 액세서리와 마찬가지로
+# 저가 매물이 추천도순 상위를 차지하는 현상). 이게 왜 문제냐면, 중고폰
+# 매물은 용량을 "256GB"가 아니라 "256"처럼 단위 없이 쓰는 경우가 흔해서
+# (신품 정식 매물은 거의 항상 "GB"를 붙여 쓴다), facet 추출용 표본이 전부
+# 중고 매물이면 "용량" facet 값 자체에 "GB" 단위가 빠져버린다.
+_USED_CONDITION_INDICATOR_TOKENS = {"중고", "중고폰", "공기계", "리퍼", "리퍼비시", "리퍼상품"}
+
+
+def _looks_like_used_condition(product_name: str) -> bool:
+    return any(token in product_name for token in _USED_CONDITION_INDICATOR_TOKENS)
+
+
+def all_candidates_look_like_used_condition(query: str, items: list[elevenst.ElevenstSearchItem]) -> bool:
+    """`check_clarify_facets`가 sortCd="H" 보정 검색을 태울지 판단하는
+    트리거(all_candidates_look_like_accessories와 같은 논리). 질의 자체가
+    중고를 찾는 거면("아이폰 16 중고") 트리거하지 않는다."""
+    if not items or _looks_like_used_condition(query):
+        return False
+    return all(_looks_like_used_condition(it["product_name"]) for it in items)
+
+
+# 2026-08-26 실측("아이폰 16/17" 데모 검증) - all_candidates_look_like_accessories가
+# sortCd="H" 보정 검색을 태워 본품을 찾아와도, 원래 있던 액세서리 후보들이
+# 그대로 후보 풀에 남아있었다. "아이폰 16 프로 클리어케이스"처럼 액세서리
+# 상품명에도 검색어가 그대로 들어있어서 임베딩 관련도 순위에서 본품과
+# 경쟁하거나 이길 수 있다 - 상위로 올라오면 추천/후보 목록에 케이스가 낀다.
+# 질의 자체가 액세서리를 찾는 게 아니면, 이미 관련성 필터를 통과한 후보
+# 중에서도 액세서리 상품명은 후보 풀에서 아예 제외한다(all_candidates_
+# look_like_accessories와 같은 단어 목록 재사용 - "전부 액세서리인지" 판단이
+# 아니라 "개별 후보가 액세서리인지" 판단으로 씀).
+def filter_out_accessory_noise(
+    query: str, items: list[elevenst.ElevenstSearchItem]
+) -> list[elevenst.ElevenstSearchItem]:
+    """질의가 액세서리를 찾는 게 아니면 후보 중 액세서리 상품명을 제외한다.
+    제외하고 나면 하나도 안 남는 경우(진짜 액세서리밖에 없거나, 단어 목록이
+    본품도 오탐한 경우)는 원래 목록을 그대로 돌려준다 - 하드 필터가 아니라
+    "더 나은 표본이 있으면 그걸 쓴다"는 소프트 필터."""
+    if _looks_like_accessory(query):
+        return items
+    non_accessories = [it for it in items if not _looks_like_accessory(it["product_name"])]
+    return non_accessories or items
+
+
+def _median_price(items: list[elevenst.ElevenstSearchItem]) -> float:
+    prices = sorted(it["price_krw"] for it in items)
+    n = len(prices)
+    mid = n // 2
+    if n % 2 == 0:
+        return (prices[mid - 1] + prices[mid]) / 2
+    return prices[mid]
+
+
+# 2026-08-26 실측("아이폰 16" 검색 - 관련성 필터를 통과한 정상 매물 18개가
+# 전부 388만~500만원대인데, 딱 2개만 2,515만원/2,998만원짜리가 섞여
+# 있었다 - 정상가 대비 5~7배, 광고성/오류 매물로 보인다. "아이폰 17"은
+# 22개 전부 399만~552만원 사이로 이런 이상치가 없었다 - 그 경계를 정확히
+# 가르는 배수로 3을 쓴다). 관련성·모델·수량까지 다 통과한 후보라도 가격이
+# 나머지 표본과 동떨어지게 비싸면 실제 판매가가 아닐 가능성이 높다 - 표본이
+# 너무 작으면(3개 미만) 중앙값 판단 자체가 불안정하므로 건너뛴다.
+_PRICE_OUTLIER_MEDIAN_MULTIPLIER = 3
+
+
+def filter_price_outliers(items: list[elevenst.ElevenstSearchItem]) -> list[elevenst.ElevenstSearchItem]:
+    """중앙값의 `_PRICE_OUTLIER_MEDIAN_MULTIPLIER`배를 넘는 가격의 후보를
+    제외한다. 전부 제외되면(표본 자체가 다 튀는 경우) 원래 목록을 그대로
+    돌려준다 - 소프트 필터."""
+    if len(items) < 3:
+        return items
+    median = _median_price(items)
+    if median <= 0:
+        return items
+    kept = [it for it in items if it["price_krw"] <= median * _PRICE_OUTLIER_MEDIAN_MULTIPLIER]
+    return kept or items
 
 
 def _dedupe_by_product_code(items: list[elevenst.ElevenstSearchItem]) -> list[elevenst.ElevenstSearchItem]:
