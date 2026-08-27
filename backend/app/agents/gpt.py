@@ -13,25 +13,16 @@ from .base import build_candidate_notes_prompt, build_recommend_prompt, build_re
 # 이름만 frontend/src/app/components/SearchResults.tsx의 AGENT_LABEL에서
 # "Qwen"으로 바꿔뒀다.
 #
-# 2026-08-25("qwen 토큰을 다써서 ... qwen역할을 잠깐 hcx로 바꿔줄래") - Qwen
-# (DashScope) 쿼터 소진으로 임시로 HCX(CLOVA Studio)를 호출하도록 바꿨다.
-# agent="gpt" 식별자·함수 시그니처는 그대로 두고 _client()/모델만 갈아
-# 끼웠다 - 나중에 Qwen 쿼터가 복구되면:
-#   1) _client()의 api_key/base_url을 settings.qwen_api_key/qwen_api_base로
-#   2) 아래 세 함수의 model=을 settings.qwen_model로
-#   3) response_format={"type": "json_object"}를 다시 추가(Qwen은 지원하지만
-#      HCX의 OpenAI 호환 엔드포인트는 json_object를 지원 안 해 지금은 뺐다 -
-#      agents/hcx.py 주석 참고, 프롬프트 지시 + parse_json_object 파싱으로 대신함)
-#   4) extra_body=_DISABLE_THINKING을 다시 추가(HCX엔 이 DashScope 전용
-#      파라미터가 없어 지금은 뺐다)
-#   5) debate.py의 두 _build_decision(...) 호출부에 넘기는
-#      model_label="HCX"도 "Qwen"으로 같이 되돌릴 것 - 사용자에게 보이는
-#      라벨이라 실제 제공자와 어긋나면 안 됨(adk_pipeline.py 호출부는 judge
-#      단계가 애초에 Qwen을 직접 부르므로 그대로 둘 것)
-# 로 되돌리면 된다. embeddings.py(관련도 정렬·의미 유사도 구제)는 이번 스왑
-# 범위 밖이다 - 그쪽은 Qwen 호출이 실패해도 이미 안전하게 폴백하도록
-# 짜여 있어(임베딩 실패 시 원본 순서 유지/의미 구제 건너뛰기) 당장 끊길
-# 위험이 없다고 판단했다.
+# 2026-08-25부터 이 슬롯은 의도적으로 HCX(CLOVA Studio)를 호출한다(처음엔
+# Qwen(DashScope) 쿼터 소진 때문에 임시로 바꾼 것이었으나, 이후 쿼터가
+# 복구된 뒤에도 한국어 표현 이해도와 효용성이 더 낫다고 판단해 HCX를 그대로
+# 유지하기로 결정했다 - Qwen으로 되돌리는 건 후속 과제가 아니다).
+# agent="gpt" 식별자·함수 시그니처는 그대로 두고 _client()/모델만 HCX로
+# 갈아 끼웠다. response_format={"type": "json_object"}는 HCX의 OpenAI 호환
+# 엔드포인트가 지원 안 해 빼고(agents/hcx.py 주석 참고), 프롬프트 지시 +
+# parse_json_object 파싱으로 대신한다. extra_body=_DISABLE_THINKING(DashScope
+# 전용 파라미터)도 HCX엔 없어 안 쓴다. embeddings.py(관련도 정렬·의미 유사도
+# 구제)는 이 전환과 무관하게 계속 Qwen을 쓴다.
 
 
 # 2026-08-24 실측 - 호출마다 AsyncOpenAI를 새로 만들면 매번 TCP/TLS
@@ -46,8 +37,8 @@ def _client() -> AsyncOpenAI:
     # max_retries=0 - 사용자 요청(2026-08-15: "너무
     # 느려 더 빠르게"). 실패해도 호출부가 이미 폴백을 갖고 있어 SDK 재시도로
     # 얻는 이득보다 지연 비용이 크다.
-    # 2026-08-25 - 임시로 HCX(CLOVA Studio)를 가리킨다(위 모듈 docstring
-    # 참고) - 되돌릴 땐 settings.qwen_api_key/qwen_api_base로.
+    # 2026-08-25부터 의도적으로 HCX(CLOVA Studio)를 가리킨다(위 모듈
+    # docstring 참고 - 한국어 이해도/효용성 때문에 유지, 임시 조치 아님).
     global _client_instance
     if _client_instance is None:
         _client_instance = AsyncOpenAI(api_key=settings.hcx_api_key, base_url=settings.hcx_api_base, max_retries=0)

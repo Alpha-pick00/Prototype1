@@ -41,14 +41,13 @@ class Settings:
     # HCX-DASH-002 - 표기 변형 제안은 단순 작업이라 가장 가벼운/빠른 등급으로
     # 충분하다(gpt.py의 thinking mode 비활성화와 같은 "느리면 안 된다" 원칙).
     hcx_model: str = os.environ.get("HCX_MODEL", "HCX-DASH-002")
-    # 2026-08-25("qwen 토큰을 다써서 ... qwen역할을 잠깐 hcx로 바꿔줄래") -
-    # DashScope(Qwen) 쿼터 소진 시 agents/gpt.py(정제/추천/후보별 이유)가
-    # 임시로 이 모델을 쓴다. 표기 변형(hcx_model=HCX-DASH-002)보다 더 무거운
-    # 판단(가격·리뷰·구매만족도 비교 후 근거 작성)이 필요해 CLOVA Studio의
-    # 문서화된 일반 채팅 모델인 HCX-005를 기본값으로 둔다. Qwen 쿼터가
-    # 복구되면 gpt.py의 _client/모델 참조를 qwen_api_key/qwen_api_base/
-    # qwen_model로 되돌리면 된다(이 설정 자체는 지워도 무해 - hcx.py의
-    # 표기 변형 전용 hcx_model과는 별개 값이라 서로 안 건드림).
+    # 2026-08-25부터 agents/gpt.py(정제/추천/후보별 이유)가 의도적으로 이
+    # 모델을 쓴다(처음엔 DashScope(Qwen) 쿼터 소진 때문이었으나, 이후 한국어
+    # 이해도/효용성이 더 낫다고 판단해 계속 유지하기로 함 - 임시 조치 아님).
+    # 표기 변형(hcx_model=HCX-DASH-002)보다 더 무거운 판단(가격·리뷰·구매
+    # 만족도 비교 후 근거 작성)이 필요해 CLOVA Studio의 문서화된 일반 채팅
+    # 모델인 HCX-005를 기본값으로 둔다(hcx.py의 표기 변형 전용 hcx_model과는
+    # 별개 값).
     hcx_recommend_model: str = os.environ.get("HCX_RECOMMEND_MODEL", "HCX-005")
 
     google_vision_api_key: str | None = os.environ.get("GOOGLE_VISION_API_KEY")
