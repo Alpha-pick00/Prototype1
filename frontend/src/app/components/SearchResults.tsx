@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { motion } from 'motion/react';
-import { AlertTriangle, ArrowUpRight, Check, ImageOff, Loader2, RotateCcw, Search, Sparkles, Truck } from 'lucide-react';
+import { AlertTriangle, ArrowUpRight, Check, ImageOff, RotateCcw, Search, Sparkles, Truck } from 'lucide-react';
 import type {
   ClarifyFacet as ClarifyFacetType,
   DecideResult,
@@ -8,9 +8,6 @@ import type {
   BrandOption,
   Proposal,
 } from '../lib/api';
-import { checkClarifyFacets } from '../lib/api';
-import { dedupeAppend } from '../context/SearchContext';
-import { getStoredToken } from '../lib/auth';
 
 const fadeUp = {
   initial: { opacity: 0, y: 16 },
@@ -237,9 +234,6 @@ interface Props {
   // 옵션 순서 자체는 백엔드가 이미 반영해 보내주므로, 여기서는 일치하는
   // 버튼에 "선호" 표시만 붙이는 시각적 용도로 쓴다.
   sessionPreferences?: Record<string, string>;
-  // 드릴다운 체인의 맨 처음 검색어(2026-08-27) - 단계별 재검색
-  // (checkClarifyFacets)이 이걸 base_query로 보내야 매 단계 캐시를 재사용한다.
-  baseQuery?: string;
   // (사용자 페르소나, 2026-08-15) label -> 선택값 맵을 그대로 넘긴다 - 값
   // 배열만 받으면 SearchContext가 어느 facet 라벨에서 이 값을 골랐는지 몰라
   // 계정/세션 페르소나에 기록할 수 없다.
@@ -252,33 +246,28 @@ interface Props {
 export const SearchResults = ({
   result,
   sessionPreferences = {},
-  baseQuery,
   onConfirmFacets,
   onSearchBroadly,
 }: Props) => {
-  // 단계별(아코디언) AI 상세검색(2026-08-27, 사용자 요청: "하나의 박스를
-  // 선택하면 그 아래로 계속 축소되는 형식으로 만들어주고 상품이 존재할 때만
-  // 박스 선택할 수 있게") - 예전엔 모든 축(기종/용량/색상 등)을 한 화면에
-  // 동시에 보여주고 "검색하기"를 눌러야 진행됐는데, 백엔드가 이미 순차적
-  // HITL(답한 축은 안 묻고 표본을 실제로 좁혀가는 구조)로 재구성됐으므로
-  // (app/debate.py::check_clarify_facets의 _strip_resolved_facets) 프론트도
-  // 한 번에 한 축만 보여주고, 옵션을 고르면 즉시 백엔드에 그 축까지 반영해
-  // 재검색해서(facet_answers) "실제로 남은 상품에 근거한" 다음 축을 받아온다.
-  // 이러면 화면에 뜨는 옵션은 항상 그 시점 실측 표본에서 나온 값이라 "상품이
-  // 존재할 때만 선택 가능"이 자동으로 성립한다(0건이 되는 조합 자체를 화면에
-  // 올리지 않음).
-  const initialFacets = result.mode === 'clarify' ? result.options.facets : [];
+  // 단계별(아코디언) AI 상세검색(2026-08-27~28, 사용자 요청 - "하나의 박스를
+  // 선택하면 그 아래로 계속 축소되는 형식", "재검색을 하는거 자체가 fallback
+  // 구조잖아 HITL이 구현된게 아니라") - 처음 clarify 응답이 필요한 축 전체
+  // (예: 시리즈→용량→색상→구매유형)를 이미 한 번에 담고 있다
+  // (app/debate.py::check_clarify_facets가 _extract_facets로 표본 90개에서
+  // 모든 축을 미리 추출해두고, 각 축의 options_by_selection에 다른 축과의
+  // 실제 조합 가능 여부까지 계산해서 준다). 예전엔 축 하나를 답할 때마다
+  // 백엔드에 facet_answers로 재검색을 걸어 "다음 축이 있는지"를 매번 다시
+  // 물어봤는데, 이게 사용자 지적대로 "일단 검색해보고 안 맞으면 되돌아가는"
+  // fallback처럼 동작했다(마지막 축을 답한 뒤에도 재검색 한 번을 더 기다려야
+  // 최종 결과가 나와 체감 지연도 있었다). 처음 받은 축 구성을 고정된 트리로
+  // 신뢰하고, 그 이후로는 순수 로컬 연산(교집합)만으로 다음 축을 좁혀
+  // 보여준다 - 서버 왕복이 전혀 없다.
+  const allFacets = result.mode === 'clarify' ? result.options.facets : [];
 
   // stepAnswers: 지금까지 확정한 축 {라벨: 값} - 순서 보존을 위해 배열도 같이 든다.
   const [answeredLabels, setAnsweredLabels] = useState<string[]>([]);
   const [stepAnswers, setStepAnswers] = useState<Record<string, string[]>>({});
-  // 서버가 방금 재검색해서 돌려준 "지금 물어야 할 축들" - 이 중 첫 번째만
-  // 현재 단계로 보여준다(나머지는 다음 단계에서 다시 요청 시 갱신됨).
-  const [pendingFacets, setPendingFacets] = useState<ClarifyFacetType[]>(initialFacets);
-  const [stepLoading, setStepLoading] = useState(false);
-  const [stepError, setStepError] = useState(false);
   const [facetQuery, setFacetQuery] = useState('');
-  const lastQueryRef = useRef(result.mode === 'clarify' ? result.query : '');
 
   // GPT 쇼핑의 "이거랑 비슷한거 더" 패턴 벤치마킹(2026-08-18, 사용자 요청
   // "GPT 쇼핑의 장점을 잘 접목시켜줘") - judge가 고른 최종 추천 하나만
@@ -287,84 +276,82 @@ export const SearchResults = ({
   // 쓰이지만 Hooks는 조건부로 못 부르니 다른 모드에서는 그냥 null로 둔다.
   const [selectedProposalUrl, setSelectedProposalUrl] = useState<string | null>(null);
 
-  const currentFacet: ClarifyFacetType | null = pendingFacets[0] ?? null;
+  // 이미 확정된 축들의 options_by_selection을 교집합으로 겹쳐, 아직 안 답한
+  // facet의 실제로 보여줄 옵션만 로컬에서 계산한다(SearchContext의 옛
+  // visibleOptionsFor와 같은 원리) - 서버 재검색 없이도 "이미 고른 값과 실제로
+  // 공존 가능한 옵션만" 보여줄 수 있다(1단계에서 이미 전체 조합 가능성을
+  // 계산해 받아왔으므로). answers를 인자로 받는다(2026-08-28 수정) - state의
+  // stepAnswers를 클로저로 직접 참조하면 advanceStep 안에서 "방금 이번
+  // 선택까지 반영한 다음 축이 있는지" 계산할 때 아직 리렌더 전이라 오래된
+  // stepAnswers를 보게 된다(setState는 비동기) - 호출부가 최신 answers를
+  // 명시적으로 넘긴다.
+  const visibleOptionsFor = (facet: ClarifyFacetType, answers: Record<string, string[]>): string[] => {
+    let options = facet.options;
+    for (const [label, values] of Object.entries(answers)) {
+      if (label === facet.label) continue;
+      const filteredSets = values
+        .map((v) => facet.options_by_selection?.[v])
+        .filter((s): s is string[] => !!s);
+      if (filteredSets.length === 0) continue;
+      const union = new Set(filteredSets.flat());
+      options = options.filter((o) => union.has(o));
+    }
+    return options;
+  };
 
-  // 방금 고른 값까지 반영해 서버에 다시 물어본다 - 실제로 남은 표본에서
-  // 다음 축을 뽑아온다(0건이 되는 옵션은 애초에 화면에 올라오지 않는다).
-  // 남은 축이 없으면(facets: []) 더 물을 게 없다는 뜻이므로 그대로
-  // onConfirmFacets를 호출해 최종 검색으로 넘어간다.
-  const advanceStep = async (label: string, value: string) => {
+  // 아직 안 답한 축들 중 첫 번째만 현재 단계로 보여준다 - 옵션이 0개로
+  // 좁혀진 축(이미 고른 값과 공존하는 옵션이 없음)은 물어볼 이유가 없어
+  // 자동으로 건너뛴다.
+  const currentFacet =
+    allFacets.filter((f) => !answeredLabels.includes(f.label) && visibleOptionsFor(f, stepAnswers).length > 0)[0] ??
+    null;
+
+  // 이 축을 답하면 로컬에서만 진행한다(서버 호출 없음) - 다음 축이 남아있으면
+  // 바로 그 축을 보여주고, 다 답했으면(remaining이 비면) 그 즉시 최종 검색으로
+  // 넘어간다. "재검색으로 다음 축이 있는지 확인"하는 단계 자체가 없어져
+  // 마지막 축을 고른 즉시 검색이 실행된다.
+  const advanceStep = (label: string, value: string) => {
     if (result.mode !== 'clarify') return;
     const nextAnsweredLabels = [...answeredLabels, label];
     const nextAnswers: Record<string, string[]> = { ...stepAnswers, [label]: [value] };
+    const hasMoreSteps = allFacets.some(
+      (f) => !nextAnsweredLabels.includes(f.label) && visibleOptionsFor(f, nextAnswers).length > 0
+    );
     setAnsweredLabels(nextAnsweredLabels);
     setStepAnswers(nextAnswers);
     setFacetQuery('');
-    setStepLoading(true);
-    setStepError(false);
-    try {
-      const combined = Object.values(nextAnswers)
-        .flat()
-        .reduce((acc, v) => dedupeAppend(acc, v), lastQueryRef.current)
-        .trim();
-      const resp = await checkClarifyFacets(
-        combined,
-        baseQuery,
-        sessionPreferences,
-        getStoredToken(),
-        nextAnswers
-      );
-      lastQueryRef.current = resp.query;
-      if (resp.options.facets.length > 0) {
-        setPendingFacets(resp.options.facets);
-      } else {
-        onConfirmFacets(nextAnswers);
-      }
-    } catch {
-      setStepError(true);
-    } finally {
-      setStepLoading(false);
+    if (!hasMoreSteps) {
+      onConfirmFacets(nextAnswers);
     }
   };
 
   // 확정한 축을 되돌아가 다시 고른다 - 그 축 이후에 답한 값은 전제가
   // 깨지므로(예: 기종을 바꾸면 그 아래서 고른 용량이 안 맞을 수 있음) 같이 지운다.
   const rewindTo = (index: number) => {
-    if (result.mode !== 'clarify') return;
     const trimmedLabels = answeredLabels.slice(0, index);
     const trimmedAnswers: Record<string, string[]> = {};
     for (const label of trimmedLabels) trimmedAnswers[label] = stepAnswers[label];
     setAnsweredLabels(trimmedLabels);
     setStepAnswers(trimmedAnswers);
     setFacetQuery('');
-    setStepError(false);
-    setStepLoading(true);
-    const combined = Object.values(trimmedAnswers)
-      .flat()
-      .reduce((acc, v) => dedupeAppend(acc, v), result.query)
-      .trim();
-    checkClarifyFacets(combined || result.query, baseQuery, sessionPreferences, getStoredToken(), trimmedAnswers)
-      .then((resp) => {
-        lastQueryRef.current = resp.query;
-        setPendingFacets(resp.options.facets);
-      })
-      .catch(() => setStepError(true))
-      .finally(() => setStepLoading(false));
   };
 
   if (result.mode === 'clarify') {
     const hasCurrentStep = !!currentFacet;
     const query = facetQuery.trim();
-    const visibleOptions = currentFacet
-      ? query
-        ? currentFacet.options.filter((o) => o.toLowerCase().includes(query.toLowerCase()))
-        : currentFacet.options
-      : [];
+    const baseOptions = currentFacet ? visibleOptionsFor(currentFacet, stepAnswers) : [];
+    const visibleOptions = query
+      ? baseOptions.filter((o) => o.toLowerCase().includes(query.toLowerCase()))
+      : baseOptions;
 
     return (
       <Card>
         <span className="text-xs font-mono uppercase tracking-widest text-neutral-400 block mb-4">
-          {hasCurrentStep ? 'AI 상세검색 · 조건을 하나씩 선택해주세요' : '조건을 좁힐 수 없었어요'}
+          {hasCurrentStep
+            ? 'AI 상세검색 · 조건을 하나씩 선택해주세요'
+            : answeredLabels.length > 0
+            ? 'AI 상세검색 · 조건에 맞는 상품을 검색하고 있습니다'
+            : '조건을 좁힐 수 없었어요'}
         </span>
         {/* 이미 확정한 축들 - 접힌 요약 칩. 클릭하면 그 축으로 되돌아간다. */}
         {answeredLabels.length > 0 && (
@@ -374,8 +361,7 @@ export const SearchResults = ({
                 key={label}
                 type="button"
                 onClick={() => rewindTo(index)}
-                disabled={stepLoading}
-                className="group inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-neutral-950 text-white text-sm font-light disabled:opacity-50 hover:bg-neutral-800 transition-colors"
+                className="group inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-neutral-950 text-white text-sm font-light hover:bg-neutral-800 transition-colors"
               >
                 <Check className="w-3.5 h-3.5 text-[#4ADE80]" strokeWidth={3} />
                 <span className="text-neutral-400 font-mono text-[10px] uppercase tracking-widest">{label}</span>
@@ -384,18 +370,7 @@ export const SearchResults = ({
             ))}
           </div>
         )}
-        {stepLoading && (
-          <div className="mb-4 flex items-center gap-2 text-xs font-light text-neutral-400">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            실제 남은 상품을 기준으로 다음 조건을 찾는 중...
-          </div>
-        )}
-        {stepError && (
-          <div className="mb-4 text-xs font-light text-amber-700">
-            조건을 불러오지 못했어요. 조건 없이 검색하거나 다시 시도해주세요.
-          </div>
-        )}
-        {!stepLoading && currentFacet && (
+        {currentFacet && (
           <div className="mb-4 last:mb-0">
             <span className="text-xs font-light text-neutral-400 block mb-2">{currentFacet.label}</span>
             {currentFacet.options.length > 4 && (
@@ -460,7 +435,7 @@ export const SearchResults = ({
             </div>
           </div>
         )}
-        {!stepLoading && (hasCurrentStep || answeredLabels.length > 0 || stepError) && (
+        {(hasCurrentStep || answeredLabels.length > 0) && (
           <div className="mb-4 last:mb-0 flex justify-end items-center gap-3">
             {/* 조건 없이 그냥 검색(2026-08-24) - 남은 축을 마저 안 골라도 지금까지
                 고른 값(또는 하나도 없으면 원래 질의) 그대로 검색할 수 있어야 한다. */}

@@ -449,7 +449,6 @@ export const Hero = () => {
                               <SearchResults
                                 result={turn.result}
                                 sessionPreferences={sessionPreferences}
-                                baseQuery={turn.baseQuery}
                                 onConfirmFacets={(selected) => selectFacets(turn.id, selected)}
                                 onSearchBroadly={() => searchBroadly(turn.id)}
                               />

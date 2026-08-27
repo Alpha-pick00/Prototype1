@@ -283,16 +283,21 @@ class _ElevenstSearchNode(BaseAgent):
         # 에서만 가끔 원문을 그대로(또는 {"error": null} 같은 지시 밖의
         # 필드까지 섞어) 돌려주는 비결정성이 실측 확인됐다.
         #
-        # 게이트는 looks_conversational_query(정규식 패턴)가 아니라 "refine
-        # 결과가 원본과 완전히 같은 문자열인지"로 잡는다 - 애초에
-        # looks_conversational_query가 이 refine 단계에 들어오는 조건
-        # 자체이므로(1단계의 before_model_callback), 원본과 같다는 것 자체가
-        # "패턴 어휘가 이 문장을 못 잡았는지 여부와 무관하게 정제가 전혀
-        # 안 됐다"는 확실한 신호다 - 특정 패턴을 새로 추가하는 것보다
-        # 근본적으로 견고하다. HCX를 다시 한번 호출해(gpt.refine_query -
-        # 직접 호출 경로라 이 문제가 재현되지 않았다) 정제를 시도하고,
-        # 그마저 실패하면(None) 원래 결과를 그대로 쓴다.
-        if refined_query and refined_query.strip() == original_query.strip():
+        # looks_conversational_query도 함께 확인해야 한다(2026-08-28 수정,
+        # 실측 발견 - "음료수 500ml 병 탄산음료"처럼 대화체가 아니라
+        # _skip_refine_if_already_specific이 애초에 LLM 호출 자체를 스킵하고
+        # 원본을 그대로 반환한 케이스까지 "정제가 전혀 안 됐다"로 오판해
+        # 여기서 강제로 HCX를 다시 불렀다. 이 재호출에서 HCX가 이미 구체적인
+        # 검색어를 자기 방식대로 재구성하며 "500ml 병" 사이 공백을 없애버려
+        # ("음료수500ml병탄산음료") 11번가 검색이 0건으로 실패했다 - 재시도의
+        # 원래 의도(정제가 필요했는데 실패한 경우 보정)와 무관한 부작용이었다.
+        # looks_conversational_query가 참일 때만(=정제가 필요해서 이 단계까지
+        # 왔는데 결과가 원본과 같은, 진짜 실패 신호일 때만) 재시도한다.
+        if (
+            refined_query
+            and refined_query.strip() == original_query.strip()
+            and looks_conversational_query(original_query)
+        ):
             retried = await gpt.refine_query(refined_query)
             if retried:
                 refined_query = retried

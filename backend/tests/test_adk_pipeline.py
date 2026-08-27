@@ -318,6 +318,41 @@ def test_run_skips_challenge_and_judge_llm_calls_end_to_end(monkeypatch):
     assert result.decision.verified is True
 
 
+def test_run_does_not_call_refine_query_when_skip_gate_already_matched_original(monkeypatch):
+    """2026-08-28, 실측 발견 회귀 방지 - "음료수 500ml 병 탄산음료"처럼
+    looks_conversational_query가 False라 _skip_refine_if_already_specific이
+    LLM 호출 자체를 건너뛰고 원본을 그대로 반환한 경우, _ElevenstSearchNode의
+    "refine 결과가 원본과 같으면 재시도" 게이트가 이걸 "정제가 실패했다"로
+    오판해 gpt.refine_query를 다시 불렀다. 그 재호출에서 HCX가 이미 구체적인
+    검색어를 자기 방식대로 재구성하며 공백을 없애버려("음료수500ml병탄산음료")
+    11번가 검색이 0건으로 실패했다. looks_conversational_query가 False인
+    질의에서는 gpt.refine_query가 아예 호출되지 않아야 한다."""
+
+    def _boom(query):
+        raise AssertionError(
+            f"looks_conversational_query가 False인 질의에서 gpt.refine_query가 호출되면 안 된다: {query!r}"
+        )
+
+    monkeypatch.setattr(adk_pipeline.gpt, "refine_query", _boom)
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
+    items = [_item("탄산음료 500ml 병", 2000, code="1")]
+
+    async def _search(query, limit):
+        return items
+
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _search)
+
+    result = asyncio.run(adk_pipeline.run("음료수 500ml 병 탄산음료"))
+
+    assert result.query == "음료수 500ml 병 탄산음료"
+    assert result.decision.product_name == "탄산음료 500ml 병"
+
+
 # ---------------------------------------------------------------------------
 # refine/challenge/judge 캐시 콜백(2026-08-26) - llm_cache.exact_get/set을
 # 인메모리 dict로 몽키패치해 실제 Supabase 없이 콜백 로직만 검증한다.
