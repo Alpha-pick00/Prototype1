@@ -8,18 +8,21 @@ alpha-pick-jet.vercel.app
 
 ### 프로젝트명 및 한 줄 소개
 
-**αlpha Pick** — 검색어를 11번가 오픈 API의 실측 구조화 데이터로 검증하고, AI 추천 Agent가 가격·리뷰·구매만족도를 종합해 근거와 함께 하나의 답으로 압축해주는 쇼핑 가격비교 서비스.
+**αlpha Pick** — 검색어를 11번가 실측 데이터로 검증하고, 판단 없이 실제 웹사이트 검색 순위를 그대로 반영해 근거와 함께 하나의 답으로 압축해주는 쇼핑 가격비교 서비스.
 
 ### 프로젝트 개요도
 
-> 검색어를 11번가 오픈 API(ProductSearch, 1st-party 구조화 데이터)로 검증하고,
-> Google ADK **8단계 `SequentialAgent`**가 refine → 검색 → propose(11번가 결과를
-> 그대로 후보로 포장) → filter_merge(관련성 검증 + 랭킹 + 의심 후보 후순위화) →
-> extract_pages(중복 제거) → challenge(DeepSeek 그라운딩 검증) → apply_challenge
-> → judge(최종 선택)를 ADK의 상태 관리·재시도·캐시 콜백으로 감싼다. 각 단계의
-> 모델/프롬프트/규칙 기반 로직은 [파이프라인 단계별 상세](#파이프라인-단계별-상세)
-> 참고. Human-in-the-loop은 텍스트 재검색 대신 구조적 로컬 필터링으로 후보군을
-> 좁혀나간다.
+> 검색어를 HCX로 정제한 뒤, **11번가 웹사이트가 실제로 쓰는 검색 순위(비공식
+> 내부 API)** 를 그대로 가져온다. Google ADK **8단계 `SequentialAgent`** 구조
+> (refine → search → propose → filter_merge → extract_pages → challenge →
+> apply_challenge → judge)는 유지하되, 2026-08-27 재구성으로 **challenge·judge·
+> 등급 보정 재검색을 걷어내고 "판단 없이 그대로" 흐르는 raw 모드**로 바뀌었다.
+> 오픈 API(`ProductSearch`)의 정렬이 실제 웹사이트 순위와 달라(액세서리가
+> 상단을 차지) 검색 소스 자체를 웹사이트 내부 API로 교체했고, 완전히 무관한
+> 상품을 거르는 관련성 필터와 가격 조건 필터만 최소한으로 남겼다. 각 단계의
+> 세부 사항은 [파이프라인 단계별 상세](#파이프라인-단계별-상세) 참고.
+> Human-in-the-loop(AI 상세검색)은 이 변경과 무관하게 기존 방식(공식 오픈
+> API + 구조적 로컬 필터링) 그대로다.
 
 ```mermaid
 flowchart LR
@@ -38,31 +41,31 @@ flowchart LR
         AC["/autocomplete"]
     end
 
-    subgraph CORE["ADK 8단계 SequentialAgent(app/adk_pipeline.py)"]
-        REFINE["1 refine<br/>(HCX - 대화체만 정제)"]
-        SEARCH11["2 search<br/>(11번가, 액세서리 도배/등급 편중<br/>감지 시 보정검색)"]
-        PROPOSE["3 propose<br/>(11번가 결과 그대로 포장)"]
-        FILTERMERGE["4 filter_merge<br/>(관련성 검증 + 랭킹<br/>+ 후순위화)"]
+    subgraph CORE["ADK 8단계 SequentialAgent · raw 모드(app/adk_pipeline.py)"]
+        REFINE["1 refine<br/>(HCX - 대화체만 정제,<br/>실패 시 1회 재시도)"]
+        SEARCH11["2 search<br/>(11번가 웹 랭킹 API,<br/>드릴다운만 오픈 API)"]
+        PROPOSE["3 propose<br/>(검색 결과 그대로 포장)"]
+        FILTERMERGE["4 filter_merge<br/>(관련성 필터 + 가격 조건 필터만,<br/>등급보정·후순위화 제거)"]
         DEDUP["5 extract_pages<br/>(product_code 중복 제거)"]
-        CHALLENGE["6 challenge<br/>(DeepSeek 그라운딩 검증)"]
-        APPLYCH["7 apply_challenge<br/>(verdict 반영)"]
-        JUDGE["8 judge<br/>(Qwen 최종 선택,<br/>후보 1개면 LLM 생략)"]
-        VARIANT["관련 상품 0건 시 표기 변형 재검색<br/>(HCX)"]
+        CHALLENGE["6 challenge<br/>(LLM 호출 스킵)"]
+        APPLYCH["7 apply_challenge<br/>(재판정 없이 통과 +<br/>후보별 추천 이유 생성)"]
+        JUDGE["8 judge<br/>(LLM 호출 스킵,<br/>검색 1위를 그대로 채택)"]
     end
 
-    subgraph CLARIFY["check_clarify_facets(app/debate.py)"]
+    subgraph CLARIFY["check_clarify_facets(app/debate.py) · 기존 방식 유지"]
         CFCACHE["정적 facet 캐시<br/>(정규식 매칭)"]
-        CFSEARCH["11번가 검색<br/>(base_query, 90개)"]
+        CFSEARCH["11번가 오픈 API 검색<br/>(base_query, 90개)"]
         CFEXTRACT["facet 추출<br/>(DeepSeek + 브랜드/기종별 보강)"]
         LLMCACHE[("Supabase KV+시맨틱 캐시<br/>(app/llm_cache.py)")]
     end
 
     subgraph EXT["외부 서비스"]
-        ELEVENST["11번가 오픈 API<br/>(ProductSearch)"]
-        QWEN["Qwen(DashScope)<br/>임베딩 · judge(최종 추천)"]
-        HCX["HCX(HyperCLOVA X)<br/>refine · 검색어 표기 변형"]
+        ELEVENSTWEB["11번가 웹 랭킹 API<br/>(비공식, 웹사이트 순위 그대로)"]
+        ELEVENST["11번가 오픈 API<br/>(ProductSearch, 드릴다운 전용)"]
+        QWEN["Qwen(DashScope)<br/>임베딩(AI 상세검색 전용)"]
+        HCX["HCX(HyperCLOVA X)<br/>refine · 후보별 추천 이유"]
         GROQ["Groq<br/>OCR 정제"]
-        DEEPSEEKAI["DeepSeek<br/>facet 추출 · 등급/액세서리 판정 · challenge"]
+        DEEPSEEKAI["DeepSeek<br/>facet 추출(AI 상세검색 전용)"]
         VISION["Google Vision OCR"]
         OAUTH["Google · Kakao · Naver"]
     end
@@ -77,20 +80,17 @@ flowchart LR
     SB --> HIST
 
     DECIDE --> REFINE --> SEARCH11 --> PROPOSE --> FILTERMERGE
-    FILTERMERGE -- "관련 상품 0건" --> VARIANT --> FILTERMERGE
     FILTERMERGE --> DEDUP --> CHALLENGE --> APPLYCH --> JUDGE
-    SEARCH11 --> ELEVENST
-    VARIANT --> HCX
+    SEARCH11 --> ELEVENSTWEB
+    SEARCH11 -. "드릴다운(base_query 있음)만" .-> ELEVENST
     REFINE --> HCX
-    FILTERMERGE --> QWEN
-    FILTERMERGE --> DEEPSEEKAI
-    CHALLENGE --> DEEPSEEKAI
-    JUDGE --> QWEN
-    JUDGE -- "최종 추천(전부 미검증이면<br/>보정검색 강제 후 1회 재실행)" --> DECIDE
+    APPLYCH --> HCX
+    JUDGE -- "검색 1위를 그대로 채택" --> DECIDE
 
     CLARIFYF --> CFCACHE
     CFCACHE -- "캐시 미스" --> CFSEARCH --> ELEVENST
     CFSEARCH --> CFEXTRACT --> DEEPSEEKAI
+    CFEXTRACT --> QWEN
     CFEXTRACT <-.-> LLMCACHE
     CFEXTRACT -- facets --> CLARIFYF
 
@@ -107,8 +107,8 @@ flowchart LR
 | --- | --- |
 | Frontend | React 18, Vite 6, TypeScript, Tailwind CSS v4, Framer Motion(`motion`), React Router (HashRouter) |
 | Backend | FastAPI, Python, httpx, PyJWT |
-| 검색 | 11번가 오픈 API(ProductSearch) - 1st-party 구조화 데이터, 스크래핑 없음 |
-| 파이프라인 | Google ADK 8단계 `SequentialAgent`(`app/adk_pipeline.py`) - 모델·프롬프트·규칙 기반 로직은 [파이프라인 단계별 상세](#파이프라인-단계별-상세) |
+| 검색 | 11번가 웹 랭킹 API(비공식, 웹사이트 실제 검색 순위) - 메인 검색 / 11번가 오픈 API(ProductSearch) - AI 상세검색 드릴다운 전용, 둘 다 스크래핑 없음 |
+| 파이프라인 | Google ADK 8단계 `SequentialAgent`(`app/adk_pipeline.py`), 2026-08-27부터 판단 최소화 raw 모드 - 모델·프롬프트·규칙 기반 로직은 [파이프라인 단계별 상세](#파이프라인-단계별-상세) |
 | LLM 응답 캐시 | Supabase(Postgres + pgvector) 기반 KV(완전 일치) + 시맨틱(임베딩 유사도) 2단 캐시 |
 | 이미지 인식 | Google Cloud Vision (텍스트 추출) → Groq (정제 · 검색어 추출) |
 | 인증 | Google / Kakao / Naver OAuth2 + JWT 기반 세션 |
@@ -167,13 +167,14 @@ flowchart LR
 
 ### 개발 이력 요약
 
-프로젝트는 세 번의 큰 재설계를 거쳤다.
+프로젝트는 네 번의 큰 재설계를 거쳤다.
 
 1. **초기(~08-10)**: GPT/Gemini/DeepSeek 멀티에이전트 구매 의사결정 엔진 + 소셜 로그인/OCR/AWS 배포 최초 구축
 2. **중기(08-11~08-19)**: Google ADK 기반 역할 분리 멀티에이전트 파이프라인(다나와 실측가 + Tavily 검색 + 3모델 병렬 제안 + 심사) + Human-in-the-loop 되묻기 도입, 다나와/쿠팡/네이버쇼핑 교차 검증으로 그라운딩 강화
-3. **현재(08-20~)**: 다나와 스크래핑 + Tavily 검색 + 멀티에이전트 디베이트 전체를 걷어내고 **11번가 오픈 API 단일 소스**로 통일. 이후 Google ADK를 그 위에 **8단계 `SequentialAgent`**로 재도입(challenge 그라운딩 검증 포함), 액세서리 도배·등급 편중 감지·의심 후보 후순위화 등 검색 품질 보정을 반복 추가
+3. **08-20~08-26**: 다나와 스크래핑 + Tavily 검색 + 멀티에이전트 디베이트 전체를 걷어내고 **11번가 오픈 API 단일 소스**로 통일. 이후 Google ADK를 그 위에 **8단계 `SequentialAgent`**로 재도입(challenge 그라운딩 검증 포함), 액세서리 도배·등급 편중 감지·의심 후보 후순위화 등 검색 품질 보정을 반복 추가
+4. **현재(08-27~)**: "판단 없이 검색 결과를 그대로 가져오면 된다"는 방향으로 메인 검색 경로를 **raw 모드**로 재구성 - challenge·judge·등급 보정 재검색을 제거하고, 오픈 API 정렬이 실제 웹사이트 순위와 다르다는 걸 실측으로 확인해 **11번가 웹 랭킹 API(비공식)** 로 검색 소스를 교체. 완전히 무관한 상품을 거르는 관련성 필터와 가격 조건 필터만 최소한으로 유지, 대신 후보별 추천 이유를 새로 추가
 
-날짜별 상세 커밋 이력은 `git log`로 확인 가능하다. 아래 섹션들은 **현재 구조**를 기준으로 설명하고, 과거에 썼다가 제거된 컴포넌트(다나와, Tavily, Google Merchant, Gemini/Claude, 쿠팡·네이버쇼핑 교차확인 등)는 이 문서에서 더 다루지 않는다.
+날짜별 상세 커밋 이력은 `git log`로 확인 가능하다. 최근 업데이트는 [날짜별 업데이트 사항](#날짜별-업데이트-사항)에 요약해뒀다. 아래 섹션들은 **현재 구조**를 기준으로 설명하고, 과거에 썼다가 제거된 컴포넌트(다나와, Tavily, Google Merchant, Gemini/Claude, 쿠팡·네이버쇼핑 교차확인 등)는 이 문서에서 더 다루지 않는다.
 
 ### 주요 트러블슈팅 (최근 · 현재 아키텍처 기준)
 
@@ -182,7 +183,11 @@ flowchart LR
 - **AI 상세검색에 액세서리 카테고리가 되묻기 옵션으로 뜸**: facet 옵션 값 자체에 액세서리 지시어(케이스/충전기/어댑터 등)가 있으면 라벨 이름과 무관하게 걸러내도록 수정(`_strip_accessory_options`)
 - **judge가 challenge 검증 결과를 못 보고 최종 추천을 고름**("골프공" 검색에 "골프파우치"가 최종 추천으로 뜸): judge 프롬프트에 challenge의 `verified`/`challenge_note`를 명시적으로 전달하도록 연결
 - **HCX가 가격/약정 의심 경고 문구를 무시하고 최저가만 선택**: 프롬프트 경고 대신 코드에서 의심 후보(시세 중앙값 대비 파격 저가, "미개봉"/"완납" 문구)의 순서 자체를 뒤로 재배열(`deprioritize_suspicious`)
-- **challenge를 규칙 기반으로 대체할 수 있는지 검증**: 골든셋 50개 라이브 실측 결과, 전체 후보의 24.6%가 challenge에서 검증 실패로 판정됐고 그중 65%는 규칙 사전으로는 못 잡는 순수 의미 판단("갤럭시 S25 FE"를 "갤럭시 S25"와 다른 모델로 구분 등) - challenge는 현행 유지
+- **challenge를 규칙 기반으로 대체할 수 있는지 검증**: 골든셋 50개 라이브 실측 결과, 전체 후보의 24.6%가 challenge에서 검증 실패로 판정됐고 그중 65%는 규칙 사전으로는 못 잡는 순수 의미 판단("갤럭시 S25 FE"를 "갤럭시 S25"와 다른 모델로 구분 등) - 그럼에도 이후(08-27) "판단 없이 그대로"라는 방향이 확정되며 challenge는 결국 스킵으로 전환
+- **오픈 API로 "판단 없이 그대로" 가져오니 웹사이트와 다른 상품이 뜸**("11번가에 아이폰 17 검색하면 핸드폰으로 뜨는데 API로는 왜 케이스가 뜨냐"): 오픈 API(`ProductSearch`, `sortCd=A`)의 정렬이 실제 11번가 웹사이트가 보여주는 순위와 다른 알고리즘임을 Playwright로 실측 확인(공식 브랜드관 우선 노출 등 UI 전용 로직 추정) → 웹사이트가 브라우저에서 실제로 호출하는 비공식 내부 API(`apis.11st.co.kr/search/api/tab`)를 찾아 검색 소스 자체를 교체
+- **"200만원대 노트북" 같은 가격 조건이 무시됨**: `extract_price_range`의 "N만원대" 파싱이 자릿수와 무관하게 항상 9999원 폭으로 계산돼(200만원대가 200~200.9999만원이 되는 등) 조건에 맞는 후보가 사실상 없었음 → N의 자릿수에 맞춰 폭을 계산하도록 수정(2만원대=1만원 폭, 200만원대=100만원 폭)
+- **refine(HCX)이 ADK 파이프라인 경로에서만 가끔 정제를 안 함**: 같은 입력을 직접 호출하면 매번 정상 정제되는데, ADK LlmAgent 경로(시스템 프롬프트 + 별도 user 메시지로 같은 텍스트가 중복 전달)에서만 원문을 그대로 반환하는 비결정성을 실측 확인 → refine 결과가 원본과 완전히 같으면 한 번 더 재시도하는 안전망 추가
+- **AI 상세검색 옵션 선택 시 검색어가 중복됨**("아이폰 17을 구매하고 싶어" → "아이폰 17" 선택 시 "아이폰 17을 구매하고 싶어 17"): 프론트가 옵션을 이어붙일 때 백엔드가 이미 정제한 값이 아니라 정제 전 원문을 기준으로 삼아, 토큰 중복 제거가 제대로 안 걸림 → clarify 응답의 정제된 질의를 base로 쓰도록 수정
 
 ---
 
@@ -208,102 +213,89 @@ flowchart LR
 
 ### 베이스라인 대비 개선
 
-LLM에게 상품 정보를 통째로 맡기는 방식(베이스라인, 존재하지 않는 상품·가격을 지어낼 위험이 있음) 대비, 후보 자체를 11번가 오픈 API의 실측 구조화 데이터로만 구성하고 규칙 기반 관련성 검증을 먼저 거치도록 설계했다. LLM(추천 Agent)은 이미 검증된 후보 중에서 고르기만 해 그라운딩이 안 된 답을 낼 수가 없고, 실패해도 최저가 규칙 기반으로 안전하게 폴백한다.
+LLM에게 상품 정보를 통째로 맡기는 방식(베이스라인, 존재하지 않는 상품·가격을 지어낼 위험이 있음) 대비, 후보 자체를 11번가 실측 구조화 데이터로만 구성하고 규칙 기반 관련성 검증을 먼저 거치도록 설계했다. 최종 추천은 LLM이 다시 고르는 게 아니라(2026-08-27부터, [파이프라인 단계별 상세](#파이프라인-단계별-상세) 참고) 이미 검증된 실제 웹사이트 검색 순위 1위를 그대로 채택해, 애초에 그라운딩이 안 된 답이 나올 여지가 없다.
 
-### 아키텍처 (11번가 단일 소스 · ADK 8단계 SequentialAgent)
+### 아키텍처 (11번가 단일 소스 · ADK 8단계 SequentialAgent · raw 모드)
 
 ```mermaid
 sequenceDiagram
     participant U as 사용자
     participant CTX as SearchContext.runTurn
     participant B as 백엔드(adk_pipeline.run_stream)
-    participant E as 11번가 오픈 API
+    participant W as 11번가 웹 랭킹 API(비공식)
     participant H as HCX
-    participant Q as Qwen
-    participant D as DeepSeek
 
     U->>CTX: 검색어 입력(첫 턴)
     CTX->>B: POST /decide/stream (base_query 없음)
     B->>H: 1 refine(대화체 질의만 정제, 이미 구체적이면 스킵)
     H-->>B: 정제된 질의
-    B->>E: 2 search - ProductSearch(query, limit=30, sortCd=A)
-    E-->>B: 검색 결과
-    B->>B: 4 filter_merge - 관련성 검증(_product_name_matches)
-    alt 관련 상품 0건(카탈로그 표기가 다름 - 예: "2프로")
-        B->>H: 대안 표기 제안 요청
-        H-->>B: 변형 표기 목록
-        B->>E: 변형 표기로 재검색
-        E-->>B: 검색 결과
+    alt refine 결과가 원본과 완전히 동일(정제 안 됨, 비결정성)
+        B->>H: 재시도
+        H-->>B: 정제된 질의
     end
-    opt 통과한 후보 대부분이 액세서리 지시어
-        B->>E: sortCd=H(가격 내림차순)로 보정 검색
-        E-->>B: 검색 결과(기존과 병합)
+    B->>W: 2 search - 웹사이트가 실제로 쓰는 검색 순위 그대로 조회
+    W-->>B: 검색 결과(사람이 보는 순위와 동일)
+    B->>B: 4 filter_merge - 관련성 필터(_product_name_matches)로<br/>완전히 무관한 상품만 제거
+    opt 필터 통과율이 너무 낮음(카테고리성 검색어, 예: "노트북")
+        B->>B: 필터를 적용하지 않고 원본 순위 그대로 유지
     end
-    opt 표본에 다른 등급(프로/프로맥스 등)만 섞여 있음
-        B->>D: 정확한 등급 여부 + 보정 키워드 판정 요청
-        D-->>B: 등급 구분 토큰 + 보정 키워드
-        B->>E: 보정 키워드로 재검색(예: "자급제")
-        E-->>B: 검색 결과(기존과 병합)
+    opt 가격 조건이 있음(예: "200만원대")
+        B->>B: 조건에 맞는 후보로 좁힘, 없으면 가격 최근접순으로 정렬 후 규칙 기반 안내
     end
-    B->>Q: 관련도순 정렬 요청(임베딩 코사인 유사도)
-    Q-->>B: 정렬된 후보
-    B->>B: 등급 토큰 없는 후보 우대 + 시세 대비 파격 저가·약정 의심 문구 후보 후순위화
     B->>B: 5 extract_pages - product_code 중복 제거
-    B->>D: 6 challenge - 상위 후보 그라운딩 검증 요청
-    D-->>B: 후보별 verified/근거
-    alt 상위 후보 전부 관련 없음으로 판정
-        B->>B: 가격 보정 검색을 강제로 켠 채 1~7단계 1회 재실행
-    end
-    alt 관련성 검증 통과 후보가 정확히 1개(& 검증 실패 아님)
-        B->>B: 8 judge LLM 호출 없이 즉시 확정
-    else
-        B->>Q: 8 judge - 최종 추천 요청(가격·리뷰·구매만족도·판매자 리스팅 수)
-        Q-->>B: 최종 추천 index + 근거
-    end
-    B-->>CTX: 상품명 · 가격 · 판매처 · 근거 + 관련 상품 목록(스트리밍)
+    Note over B: 6 challenge / 8 judge - LLM 호출 없이 스킵<br/>(검색 결과 1위를 그대로 채택)
+    B->>H: 7 apply_challenge - 후보별 추천 이유 생성(최대 5개)
+    H-->>B: 후보별 한 줄 이유
+    B-->>CTX: 상품명 · 가격 · 판매처 · 후보별 이유 (스트리밍)
     CTX-->>U: 대화 스레드에 결과 카드 표시
 ```
 
+AI 상세검색 드릴다운(`base_query`가 있는 턴)은 위 raw 모드와 별개로 **기존 방식을
+그대로 유지**한다 - 11번가 오픈 API로 넓게(90개) 검색한 뒤 사용자가 고른 facet 값으로
+로컬 필터링하며, 관련성 필터·가격 필터도 동일하게 거친다.
+
 짧고 애매한 검색어(예: "핸드폰")는 위 흐름 전에 `POST /decide/clarify`(11번가 검색 결과
 기반 동적 facet, DeepSeek)를 먼저 시도한다 - 카테고리 축은 되묻지 않고, 드릴다운
-후속 턴(`base_query`가 있는 턴)은 매번 재검색하는 대신 `base_query`로 한 번만 검색한
-결과를 로컬 필터링(`_filter_items_by_extra_terms`)으로 좁혀나간다. facet을 못 찾으면
-그대로 `/decide/stream` 경로로 넘어간다.
+후속 턴은 매번 재검색하는 대신 `base_query`로 한 번만 검색한 결과를 로컬 필터링
+(`_filter_items_by_extra_terms`)으로 좁혀나간다. facet을 못 찾으면 그대로
+`/decide/stream` 경로로 넘어간다.
 
 ### 파이프라인 단계별 상세
 
-8단계 각각에서 **어떤 모델을 쓰는지, 프롬프트가 무슨 역할을 하는지, 어디까지가
-규칙(코드) 기반인지**를 정리한다. 실제 프롬프트 전문/코드는 각 파일 참고 - 여기서는
-"무엇을 어떤 방식으로 판단하는가"만 설명한다.
+2026-08-27부터 메인 검색 경로(`/decide`, `/decide/stream`)는 **raw 모드**로
+동작한다 - "판단 없이 검색 결과를 그대로 가져오면 된다"는 방향에 따라
+challenge·judge·등급 편중 보정 재검색을 걷어냈다. 8단계 `SequentialAgent`
+구조 자체(각 단계가 노드로 존재하는 것)는 유지하되, 아래 표처럼 몇몇 단계는
+LLM을 아예 호출하지 않고 통과시킨다.
 
 | # | 단계 | 모델 | LLM 호출 시점 | 프롬프트 역할 | 규칙 기반(코드) 로직 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | **refine** | HCX(`HCX-DASH-002`) | 질의가 대화체("~하고 싶어" 등)일 때만 | 대화체 질의에서 실제 검색어만 뽑아 정제(예: "저렴한 아기 간식을 사고 싶어" → "아기 간식") | 정규식(`looks_conversational_query`)으로 이미 짧고 구체적인 질의는 LLM 호출 자체를 건너뜀. 가격 조건("2만원대")은 LLM 이전에 정규식으로 먼저 분리 |
-| 2 | **search** | (기본) 없음, 조건부 DeepSeek | 액세서리 도배 또는 등급 편중이 감지될 때만 | ① 액세서리 도배 의심: "이 후보 목록에 본품이 있는가" 판정 ② 등급 편중: "표본에 정확한 등급이 있는가, 없으면 어떤 보정 키워드로 재검색해야 하는가" 판정(카테고리마다 다른 키워드를 LLM이 직접 제안, 하드코딩 아님) | 11번가 `ProductSearch`(`sortCd=A` 가격 오름차순) 30개 검색이 기본. 액세서리 지시어 사전 매칭(`most_candidates_look_like_accessories`)이 1차 게이트라 대부분의 검색은 LLM 호출 없이 끝남 - 걸린 경우만 `sortCd=H` 보정 검색 |
-| 3 | **propose** | 없음 | - | - | 11번가 검색 결과를 그대로 후보 풀로 포장(단일 소스라 LLM 추정 자체가 불필요) |
-| 4 | **filter_merge** | Qwen(임베딩), 조건부 HCX | 항상(임베딩 정렬), 관련 상품 0건일 때만(HCX 표기 변형) | 표기 변형: 카탈로그 표기가 다른 경우("2프로"↔"이프로") 대안 검색어 제안 | 관련성 검증(rapidfuzz 유사도 + 모델/규격 토큰 충돌 + 배타 토큰 + 액세서리 오매칭, 전부 규칙)이 먼저 걸러내고, 통과한 후보만 Qwen 임베딩(`text-embedding-v3`) 코사인 유사도로 랭킹. 등급 토큰 없는 후보 우대, 의심 후보(중앙값 대비 파격 저가·약정 의심 문구) 후순위화는 둘 다 순수 코드 |
+| 1 | **refine** | HCX(`HCX-DASH-002`) | 질의가 대화체("~하고 싶어" 등)일 때만 | 대화체 질의에서 실제 검색어만 뽑아 정제(예: "아이폰 17을 구매하고 싶어" → "아이폰 17") | 정규식(`looks_conversational_query`)으로 이미 짧고 구체적인 질의는 LLM 호출 자체를 건너뜀. 가격 조건("200만원대")은 LLM 이전에 정규식으로 먼저 분리(자릿수에 맞춰 폭 계산). refine 결과가 원본과 완전히 같으면(정제 실패로 판단) HCX를 1회 재시도 |
+| 2 | **search** | 없음 | - | - | 검색어 조건 없는 단발 질의는 **11번가 웹 랭킹 API**(비공식, 웹사이트가 브라우저에서 실제로 호출하는 내부 API)를 그대로 호출해 사람이 웹에서 보는 순위 그대로 받는다. AI 상세검색 드릴다운(`base_query` 있음)만 예외적으로 기존 11번가 오픈 API(`ProductSearch`, 90개 넓게 검색 후 로컬 필터링)를 그대로 씀 |
+| 3 | **propose** | 없음 | - | - | 검색 결과를 그대로 후보 풀로 포장(LLM 추정 없음) |
+| 4 | **filter_merge** | 없음 | - | - | 관련성 필터(`_product_name_matches`)로 완전히 무관한 상품(다른 모델/수량, 본품 vs 부속품)만 제거 - 단, 필터 통과율이 너무 낮으면(카테고리성 검색어, 예: "노트북 추천") 필터 자체를 건너뛰고 원본 순위 유지. 가격 조건이 있으면 범위 필터링, 조건에 맞는 게 없으면 가격 최근접순 규칙 기반 안내 |
 | 5 | **extract_pages** | 없음 | - | - | `product_code` 기준 중복 제거(먼저 나온, 더 관련도 높은 쪽을 유지) |
-| 6 | **challenge** | DeepSeek(`deepseek-chat`) | 상위 최대 10개 후보에 대해 항상 | 규칙 필터를 통과한 후보가 "표기만 비슷할 뿐 실제로는 다른 상품"인지 의미 기반으로 재검증(예: 액세서리, 다른 브랜드/모델) | 명백한 액세서리 지시어가 상품명에 있는데 challenge가 놓치면 규칙으로 강제 `verified=False` 오버라이드(LLM이 프롬프트의 "애매하면 true로" 지시를 과하게 적용하는 걸 실측 확인) |
-| 7 | **apply_challenge** | 없음 | - | - | challenge 판정(`verified`/`challenge_note`)을 후보 목록에 index 기준으로 반영 |
-| 8 | **judge** | Qwen(`qwen3.7-plus`), 조건부 스킵 | 관련성 검증 통과 후보가 2개 이상이거나, 1개여도 challenge에서 검증 실패로 나왔을 때만 | 가격·리뷰 수·구매만족도·동일 판매자 리스팅 수를 종합해 최종 추천 하나 선택, "[검증 실패: ...]"/"[다른 등급]" 표시가 있는 후보는 그런 표시가 없는 후보가 있는 한 피하도록 지시 | 후보가 정확히 1개고 검증도 통과했으면 LLM 호출 없이 즉시 확정(`_skip_judge_if_single_candidate`). 실패 시 최저가 규칙 기반 폴백 |
+| 6 | **challenge** | ~~DeepSeek~~ (스킵) | 호출 안 함 | - | 항상 스킵 - 노드는 파이프라인에 남아있지만 LLM 호출 자체가 안 나감 |
+| 7 | **apply_challenge** | HCX(`HCX-005`) | 항상(상위 최대 5개 후보) | 각 후보가 "어떤 사람에게 왜 괜찮은 선택인지" 가격·리뷰·구매만족도·판매자 근거로 1문장씩 설명(challenge 재판정은 하지 않음, 순서·선택에 영향 없음) | HCX가 지시한 JSON 형식을 안 지키는 비결정성이 커서(리스트/딕셔너리 등 여러 변형으로 응답), 인덱스·상품명 기반 범용 폴백 파싱으로 최대한 복구 |
+| 8 | **judge** | ~~Qwen~~ (스킵) | 호출 안 함 | - | 항상 스킵 - 검색 결과 1위(index=0)를 그대로 최종 추천으로 확정 |
 
 > 위 표는 실제 라이브 경로(`/decide`, `/decide/stream` → `adk_pipeline`)만
 > 다룬다. 로컬 실험 전용인 `/decide/elevenst-only`(프론트 미사용, `debate.py`의
 > `run_elevenst_only_debate`)는 challenge 단계 자체가 없는 더 단순한 선형
 > 버전이고, refine도 다른 함수(`gpt.refine_query`)를 쓴다 - `agent="gpt"`
 > 식별자와 파일명 `gpt.py`는 원래 이 슬롯이 Qwen을 호출하던 시절의 흔적이고,
-> 지금은 의도적으로 HCX(`HCX-005`, 위 refine 단계가 쓰는 `HCX-DASH-002`와는
-> 다른 모델)를 호출한다 - 한국어 표현 이해도와 효용성이 더 낫다고 판단해
-> 채택한 것으로, Qwen 쿼터 문제로 인한 임시 조치가 아니다. 같은 이유로 이
-> 경로의 최종 추천(judge에 해당하는 `recommend_best`)도 HCX다.
+> 지금은 의도적으로 HCX(`HCX-005`)를 호출한다 - 한국어 표현 이해도와
+> 효용성이 더 낫다고 판단해 채택한 것으로, Qwen 쿼터 문제로 인한 임시
+> 조치가 아니다. 같은 이유로 이 경로의 최종 추천(judge에 해당하는
+> `recommend_best`)도 HCX다.
 
 **모델별 호출 목적 요약**
 
 | 모델 | 이 프로젝트에서의 역할 |
 | --- | --- |
-| **Qwen**(DashScope) | 임베딩(`text-embedding-v3`, 관련도 랭킹) + judge(최종 추천 선택) |
-| **DeepSeek** | AI 상세검색 facet 추출 + challenge(그라운딩 검증) + 액세서리 도배/등급 편중 의미 판정 |
-| **HCX**(HyperCLOVA X) | 대화체 질의 정제(refine) + 검색어 표기 변형 제안 |
+| **HCX**(HyperCLOVA X) | 대화체 질의 정제(refine) + 후보별 추천 이유 생성(`apply_challenge`) + AI 상세검색·드릴다운 경로의 검색어 표기 변형 제안 |
+| **Qwen**(DashScope) | 임베딩(`text-embedding-v3`) - AI 상세검색·드릴다운 경로의 관련도 랭킹에만 쓰임(메인 경로의 challenge/judge는 스킵돼 호출 없음) |
+| **DeepSeek** | AI 상세검색 facet 추출 - 메인 경로의 challenge/등급 편중 판정은 스킵돼 호출 없음 |
 | **Groq** | OCR 결과 정제(가격/바코드 제거, 검색어 추출) |
 | **Google Cloud Vision** | 이미지 OCR 텍스트 추출 |
 
@@ -315,6 +307,47 @@ sequenceDiagram
 - 액세서리 도배·등급 편중 2종 모두 "키워드/사전 1차 게이트 → 놓친 경우만 LLM 의미 판정" 구조로 설계해 평소 검색 속도/비용에는 영향 없이 커버리지만 확장
 - judge 단계에 후보 1개 스킵 로직 추가로 불필요한 LLM 호출 제거
 - 골든셋 50개(10카테고리×5) 라이브 실측으로 challenge 단계의 실효성을 정량 검증(24.6%가 실제 검증 실패, 그중 65%는 규칙으로 불가능한 판단)
+- **(08-27)** challenge·judge·등급 편중 보정을 걷어내 메인 경로 LLM 호출을 5단계 → 2단계(refine, 후보별 이유 생성)로 축소, 검색 소스를 실제 웹사이트 순위와 동일한 내부 API로 교체 - 지연시간 단축과 동시에 "왜 케이스가 뜨냐" 류 불일치 문제를 구조적으로 해소
+
+### 날짜별 업데이트 사항
+
+최근 작업만 날짜순으로 정리한다(전체 이력은 `git log` 참고, 큰 재설계 흐름은
+[개발 이력 요약](#개발-이력-요약) 참고).
+
+**2026-08-27**
+- 메인 검색 경로(`/decide`, `/decide/stream`)를 **raw 모드**로 재구성 - challenge·judge·등급 편중 보정 재검색 제거
+- 검색 소스를 11번가 오픈 API에서 **웹사이트 실제 검색 순위(비공식 내부 API)** 로 교체
+- 후보별 추천 이유(HCX) 생성 기능 신규 추가
+- `extract_price_range`의 "N만원대" 가격 폭 계산 버그 수정(자릿수 무관하게 항상 9999원 폭이던 문제)
+- refine(HCX) 비결정성 대응 재시도 로직, `candidate_notes` 응답 형식 불일치 대응 범용 파싱 추가
+- AI 상세검색 옵션 선택 시 검색어 중복("아이폰 17을 구매하고 싶어 17") 버그 수정
+- AI 상세검색에서 질의와 정확히 같은 facet 옵션이 사라지던 문제, 액세서리 도배 의미 판정 사각지대(관련 후보 0건일 때) 수정
+- 등급 편중(프로/프로맥스만 매핑) 문제를 검색·랭킹·최종 추천 전 구간에 걸쳐 마무리 수정, `Decision.verified`가 항상 `None`이던 버그 수정
+- judge 단일 후보 스킵 로직 추가, "challenge를 규칙으로 대체 가능한가" 골든셋 실측 검증(24.6% 검증 실패, 65%는 순수 의미 판단 - 결과적으로 이후 challenge 자체를 스킵하는 방향으로 정리됨)
+- 랜딩페이지·README를 실제 ADK 8단계 파이프라인 기준으로 갱신
+
+**2026-08-26**
+- "아이폰 17"/"아이폰 16" 등 등급이 있는 상품 검색 시 상위 등급(프로/프로맥스)만 매핑되고 기본형이 안 잡히던 문제 최초 수정(등급 편중 감지·보정 재검색·랭킹 우대 도입)
+- AI 상세검색 facet에 액세서리(케이스/충전기 등)·다른 브랜드가 섞여 나오던 문제 수정
+- refine 단계를 Qwen에서 HCX로 교체
+- judge가 challenge 검증 결과를 못 보고 최종 추천을 고르던 문제, challenge가 놓친 명백한 액세서리를 규칙 기반으로 재검증하는 안전망 추가
+- 죽은 코드(미사용 스키마·엔드포인트) 정리
+
+**2026-08-25**
+- 메인 검색 파이프라인을 **Google ADK 8단계 `SequentialAgent`** 구조로 재구성(현재 구조의 원형)
+- "2만원대로 사고 싶어" 같은 가격 조건 질의 처리, 자연어 질의 정제 대상 확대
+- "Powered by"에 11번가 공식 브랜드 로고 추가, 랜딩페이지 소개 문구를 11번가 단일 소스 구조에 맞게 개편
+
+**2026-08-24**
+- 검색어 자동 정제(refine) 기능 도입, 표기 차이로 인한 검색 실패에 임베딩 기반 2차 구제 추가
+- 다른 후보 각각에 대한 개별 추천 이유 기능 도입(카드 UI 순위 배지 포함)
+- 체감 속도 개선 - 메인 추천 먼저 스트리밍, 다른 후보 이유는 나중에 patch
+- AI 상세검색 facet 다중 선택 지원, 조건 없이 포괄적으로 검색하는 옵션 추가
+
+**2026-08-20 ~ 08-21**
+- 다나와 스크래핑 + Tavily 검색 + 멀티에이전트 디베이트 구조를 걷어내고 **11번가 오픈 API 단일 소스**로 전환(가장 큰 재설계)
+- HITL(AI 상세검색)을 "쿼리 재구성 후 재검색" 방식에서 "구조적 로컬 필터링" 방식으로 재설계
+- Qwen "thinking mode" 비활성화로 응답 지연 20~95초 → 2~5초 단축
 
 ### 한계점 및 향후 과제
 
@@ -324,3 +357,5 @@ sequenceDiagram
 - 11번가 오픈 API가 카테고리 코드 필터를 지원하지 않아, AI 상세검색의 카테고리 축은 사용자에게 되묻지 않고 표본을 좁히는 데도 안 씀
 - HCX 검색어 표기 변형 재검색은 1차 검색 실패 시에만 타는 폴백이라 평소 검색 속도에는 영향 없지만, 그 경로 자체는 추가 LLM 호출 + 재검색으로 몇 초 더 걸림
 - 11번가 오픈 API 자체의 검색 결과 비결정성(같은 질의도 호출마다 표본이 크게 달라짐)이 반복 관측됨 - 골든셋 50개 중 14%가 API 응답 자체 실패
+- 메인 검색이 쓰는 11번가 웹 랭킹 API는 **공식 문서화되지 않은 비공식 내부 API** - 11번가가 사전 공지 없이 스키마를 바꾸거나 접근을 막을 수 있음. 실패 시 빈 결과로 안전하게 폴백하도록 처리했지만, 근본적으로 통제할 수 없는 외부 의존성
+- challenge/judge를 스킵하면서 "왜 이 상품을 추천했는지"에 대한 LLM 검증·최종 판단 근거는 사라짐 - 대신 붙인 후보별 추천 이유(HCX)는 선택에 영향을 주지 않는 설명용 텍스트일 뿐, 검증 장치는 아님
