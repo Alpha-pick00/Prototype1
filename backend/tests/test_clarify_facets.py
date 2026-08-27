@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from app.debate import (
     _enrich_facets_per_brand,
     _MAX_BRAND_ENRICH_FANOUT,
+    _strip_nonexistent_options,
     _strip_query_answered_options,
     check_clarify_facets,
     run_elevenst_only_debate,
@@ -972,7 +973,10 @@ def test_check_clarify_facets_orders_facets_from_macro_to_micro(monkeypatch):
     용량/특징 같은 좁은 기준보다 먼저 오도록 정렬해야 한다."""
 
     async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "오리온 초코파이 바나나 468g", "total_mall_count": None}]
+        return [
+            {"pcode": "1", "product_name": "오리온 초코파이 바나나 468g 저당", "total_mall_count": None},
+            {"pcode": "2", "product_name": "롯데 초코파이 234g 고당", "total_mall_count": None},
+        ]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
@@ -998,7 +1002,10 @@ def test_check_clarify_facets_orders_phone_model_facet_first(monkeypatch):
     와야 한다."""
 
     async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "삼성전자 갤럭시S25 케이스", "total_mall_count": None}]
+        return [
+            {"pcode": "1", "product_name": "삼성전자 갤럭시S25 케이스 방수", "total_mall_count": None},
+            {"pcode": "2", "product_name": "신지모루 갤럭시S26 케이스 충격방지", "total_mall_count": None},
+        ]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
@@ -1050,7 +1057,11 @@ def test_check_clarify_facets_strips_accessory_options_regardless_of_label(monke
     한다."""
 
     async def _fake_search(query, limit=90):
-        return [{"pcode": "1", "product_name": "아이폰 17 프로 맥스 256GB", "total_mall_count": None}]
+        return [
+            {"pcode": "1", "product_name": "아이폰 17 프로 맥스 256GB", "total_mall_count": None},
+            {"pcode": "2", "product_name": "아이폰 17 프로 256GB", "total_mall_count": None},
+            {"pcode": "3", "product_name": "아이폰 16 휴대폰 케이스 어댑터 차량용 충전기", "total_mall_count": None},
+        ]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
 
@@ -1074,7 +1085,11 @@ def test_check_clarify_facets_keeps_accessory_options_when_query_is_accessory_it
     보여주는 게 정상이라 걸러내면 안 된다."""
 
     async def _fake_search(query, limit=90):
-        return [{"pcode": "1", "product_name": "아이폰 17 클리어 케이스", "total_mall_count": None}]
+        return [
+            {"pcode": "1", "product_name": "아이폰 17 클리어케이스", "total_mall_count": None},
+            {"pcode": "2", "product_name": "아이폰 17 젤리케이스", "total_mall_count": None},
+            {"pcode": "3", "product_name": "아이폰 17 범퍼케이스", "total_mall_count": None},
+        ]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
 
@@ -1148,7 +1163,10 @@ def test_check_clarify_facets_still_searches_when_model_number_leaves_other_axes
     실제로 시도해야 한다)."""
 
     async def _fake_search(query, limit=3):
-        return [{"pcode": "1", "product_name": "아이폰 15 프로 256GB 블랙티타늄", "total_mall_count": None}]
+        return [
+            {"pcode": "1", "product_name": "아이폰 15 프로 256GB 블랙티타늄", "total_mall_count": None},
+            {"pcode": "2", "product_name": "아이폰 15 프로 256GB 화이트티타늄", "total_mall_count": None},
+        ]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
 
@@ -1211,7 +1229,10 @@ def test_check_clarify_facets_static_cache_miss_falls_through_to_real_search(mon
     """목록에 없는 카테고리는 지금까지처럼 실제 검색+추출 경로를 그대로 타야 한다."""
 
     async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "코카콜라 350ml 24개", "total_mall_count": None}]
+        return [
+            {"pcode": "1", "product_name": "새우깡 봉지 90g", "total_mall_count": None},
+            {"pcode": "2", "product_name": "포카칩 박스 66g", "total_mall_count": None},
+        ]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
@@ -1244,6 +1265,58 @@ def test_check_clarify_facets_returns_facets_for_ambiguous_query(monkeypatch):
 
     assert result.mode == "clarify"
     assert result.options.facets == [ClarifyFacet(label="브랜드", options=["코카콜라", "칠성사이다"])]
+
+
+# -- app.debate._strip_nonexistent_options (2026-08-28, 사용자 리포트 - "아이패드"
+# 검색 후 AI 상세검색에서 "터치패드"를 고르면 실제로는 그 표본에 존재하지 않는
+# 상품이라 최종 검색이 0건으로 실패했다. DeepSeek이 상품명 목록에 실제로는 없는
+# 값을 지어낸(hallucination) 사례 - 존재하지 않는 옵션은 애초에 선택지로 노출되지
+# 않아야 한다는 원칙을 되묻기 옵션 생성 단계까지 끌어올렸다) ---------------------
+
+
+def test_strip_nonexistent_options_removes_value_not_in_any_product_name():
+    """실측 재현(2026-08-28) - "아이패드" 검색 결과 상품명 어디에도 "터치패드"가
+    없는데 DeepSeek이 부가기능 축에 지어내 넣은 경우, 그 값만 걸러내고 실제로
+    존재하는 값("블루투스")은 남긴다."""
+    facets = [ClarifyFacet(label="부가기능", options=["블루투스", "터치패드", "펜슬 수납"])]
+    names = ["아이패드 프로 11 블루투스 키보드 케이스", "아이패드 에어 애플펜슬 수납 파우치"]
+
+    result = _strip_nonexistent_options(facets, names)
+
+    assert result == [ClarifyFacet(label="부가기능", options=["블루투스", "펜슬 수납"])]
+
+
+def test_strip_nonexistent_options_drops_facet_left_with_under_two_values():
+    """필터링 후 서로 다른 값이 1개 이하로 남으면 그 기준 자체가 더 이상 좁혀주는
+    게 없으므로 facet 전체를 뺀다(_strip_query_answered_options와 같은 원칙)."""
+    facets = [ClarifyFacet(label="색상", options=["블랙", "존재하지않는색"])]
+    names = ["아이폰 17 블랙 256GB"]
+
+    result = _strip_nonexistent_options(facets, names)
+
+    assert result == []
+
+
+def test_strip_nonexistent_options_leaves_untouched_facet_when_nothing_removed():
+    """전부 실제로 존재하는 값이면 facet을 그대로 둔다."""
+    facets = [ClarifyFacet(label="색상", options=["블랙", "화이트"])]
+    names = ["아이폰 17 블랙 256GB", "아이폰 17 화이트 256GB"]
+
+    result = _strip_nonexistent_options(facets, names)
+
+    assert result == facets
+
+
+def test_strip_nonexistent_options_matches_ignoring_whitespace():
+    """상품명과 옵션의 띄어쓰기가 달라도(예: 옵션 "휴대폰 케이스" vs 상품명의
+    "휴대폰케이스") 존재로 인정한다 - _build_facet_value_incidence와 같은
+    정규화 규칙(공백 제거)을 공유한다."""
+    facets = [ClarifyFacet(label="제품분류", options=["휴대폰 케이스", "액정보호필름", "없는분류"])]
+    names = ["아이폰 17 휴대폰케이스 투명", "아이폰 17 액정보호필름 강화유리"]
+
+    result = _strip_nonexistent_options(facets, names)
+
+    assert result == [ClarifyFacet(label="제품분류", options=["휴대폰 케이스", "액정보호필름"])]
 
 
 def test_strip_query_answered_options_removes_value_already_in_query():
@@ -1594,7 +1667,10 @@ def test_check_clarify_facets_returns_empty_when_deepseek_finds_nothing(monkeypa
 
 def test_decide_clarify_endpoint_returns_clarify_response(monkeypatch):
     async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "코카콜라 350ml", "total_mall_count": None}]
+        return [
+            {"pcode": "1", "product_name": "코카콜라 350ml", "total_mall_count": None},
+            {"pcode": "2", "product_name": "칠성사이다 350ml", "total_mall_count": None},
+        ]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 

@@ -966,6 +966,42 @@ def _apply_persona_ordering(facets: list[ClarifyFacet], persona: dict[str, str])
 _FACET_CACHE_NAMESPACE = "clarify_facets"
 
 
+def _strip_nonexistent_options(facets: list[ClarifyFacet], names: list[str]) -> list[ClarifyFacet]:
+    """DeepSeek이 상품명 목록에 실제로는 없는 값을 지어내는 경우가 있다
+    (2026-08-28, 사용자 리포트 - "아이패드" 검색 후 AI 상세검색에서 "터치패드"를
+    고르면 "아이패드 터치패드"로 검색되는데 상품이 존재하지 않는다고 뜬다.
+    실측 확인: "아이패드" 검색 결과 90개 상품명 어디에도 "터치패드"라는
+    문자열이 없었다 - 상품명 요약/의역 과정에서 만들어낸 값이었다). 옵션이
+    실제로 최소 하나의 상품명에 부분 문자열로 등장하는지 검증해, 존재하지
+    않는 값은 애초에 선택지로 노출되지 않게 한다 - "상품이 존재할 때만 선택
+    가능해야 한다"는 원칙을 되묻기 자체의 옵션 생성 단계까지 끌어올린 것이다
+    (기존에는 매 라운드 재검색(facet_answers 필터링) 시점에야 0건으로
+    드러났는데, 그때는 이미 사용자가 존재하지 않는 값을 선택한 뒤라 늦었다).
+
+    _build_facet_value_incidence와 같은 정규화 규칙(공백 제거 + 소문자)을
+    써서 새 네트워크 요청 없이 이미 받아온 names만으로 판정한다."""
+    normalized_names = [_normalize_for_match(name) for name in names]
+    result: list[ClarifyFacet] = []
+    for facet in facets:
+        kept = [
+            opt for opt in facet.options if any(_normalize_for_match(opt) in n for n in normalized_names)
+        ]
+        if len(kept) == len(facet.options):
+            result.append(facet)
+            continue
+        if len(dict.fromkeys(kept)) < 2:
+            continue
+        options_by_selection = None
+        if facet.options_by_selection:
+            filtered = {
+                selector: [v for v in values if v in kept]
+                for selector, values in facet.options_by_selection.items()
+            }
+            options_by_selection = {k: v for k, v in filtered.items() if v} or None
+        result.append(ClarifyFacet(label=facet.label, options=kept, options_by_selection=options_by_selection))
+    return result
+
+
 async def _extract_facets(
     query: str, names: list[str], persona: dict[str, str] | None = None
 ) -> list[ClarifyFacet]:
@@ -982,6 +1018,7 @@ async def _extract_facets(
         facets = [ClarifyFacet(**f) for f in cached["facets"]]
     else:
         facets = await deepseek.extract_facets_from_names(query, names)
+        facets = _strip_nonexistent_options(facets, names)
         facets = await _enrich_facets_per_brand(facets, names, query)
         facets = await _enrich_device_models_by_ecosystem(facets, names, query)
         facets = _attach_facet_crossfilter(facets, names)
