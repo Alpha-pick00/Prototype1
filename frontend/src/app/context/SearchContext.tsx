@@ -108,11 +108,22 @@ const SearchContext = createContext<SearchContextValue | null>(null);
 // 정보를 찾지 못했다" - 시리즈 옵션 "초코파이 바나나" 자체가 이미 원래 검색어
 // "초코파이"를 포함하고 있어서, 그냥 이어붙이면 "초코파이"가 두 번 들어가
 // 검색이 이상하게 안 맞는 검색어가 됐다). 토큰(공백 기준) 단위로만 비교한다.
+//
+// addition 전체가 base와 공백만 다르고 사실상 같은 문자열이면(2026-08-27,
+// 사용자 리포트 "아이폰 17 프로 치고 아이폰 17 프로 치면 아이폰 17 프로
+// 아이폰17 이 됨") 통째로 버린다 - "아이폰 17 프로"(토큰: 아이폰/17/프로)에
+// AI 상세검색이 뽑아준 "아이폰17 프로"(토큰: 아이폰17/프로)를 이어붙이면
+// "아이폰17"이 base 토큰 어디와도 문자열이 안 맞아 중복으로 안 걸러졌다.
+const normalizeForDedupe = (text: string) => text.replace(/\s+/g, '').toLowerCase();
+
 export const dedupeAppend = (base: string, addition: string): string => {
+  const trimmedAddition = addition.trim();
+  if (trimmedAddition && normalizeForDedupe(trimmedAddition) === normalizeForDedupe(base)) {
+    return base.trim();
+  }
   const baseTokens = base.trim().split(/\s+/).filter(Boolean);
   const seen = new Set(baseTokens.map((t) => t.toLowerCase()));
-  const newTokens = addition
-    .trim()
+  const newTokens = trimmedAddition
     .split(/\s+/)
     .filter((t) => t && !seen.has(t.toLowerCase()));
   return [...baseTokens, ...newTokens].join(' ');
