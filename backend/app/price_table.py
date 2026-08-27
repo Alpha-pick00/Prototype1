@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import statistics
 
 from rapidfuzz import fuzz
@@ -84,14 +85,41 @@ async def _search_elevenst_items(query: str, limit: int) -> list[elevenst.Eleven
 _MIN_TOKEN_SORT_RATIO = 18
 
 
+def _insert_hangul_digit_boundary_space(text: str) -> str:
+    """"아이폰17" -> "아이폰 17"처럼 한글-숫자 경계에 공백을 끼워 넣는다
+    (2026-08-27) - `_product_name_matches`가 원문 비교로 임계값 미달일 때
+    표기 차이(붙여쓰기/띄어쓰기) 보정용 재시도에 쓴다."""
+    text = re.sub(r"([가-힣])(\d)", r"\1 \2", text)
+    text = re.sub(r"(\d)([가-힣])", r"\1 \2", text)
+    return text
+
+
 def _product_name_matches(decision_name: str, candidate_name: str) -> bool:
     """검색 결과 상품명(candidate_name)이 실제로 질의/결정된 상품명
     (decision_name)과 같은 상품인지 판정한다 - app.debate의
     run_elevenst_only_debate/run_brand_price가 검색 결과를 후보로 받아들이기
-    전 관련성 가드로 쓴다."""
-    if fuzz.token_set_ratio(decision_name, candidate_name) < NAME_SIMILARITY_THRESHOLD:
+    전 관련성 가드로 쓴다.
+
+    붙여쓰기/띄어쓰기 표기 차이 보정(2026-08-27, 사용자 리포트 - "핸드폰"
+    드릴다운에서 "아이폰17"(AI 상세검색이 붙여쓰기로 뽑은 facet 값)을
+    골랐는데 실제 상품명은 "아이폰 17"(띄어쓰기)이라 token_set_ratio가
+    14.6점으로 나와(rapidfuzz는 "아이폰17"을 "아이폰"/"17"과는 다른 별개
+    토큰으로 봄) 진짜 상품까지 전부 걸러졌다 - 검색 결과 0건). 원문
+    비교가 임계값 미달이면 한글-숫자 경계에 공백을 끼워 넣은 버전으로
+    한 번 더 시도한다("아이폰17" -> "아이폰 17") - 완전히 공백을 지우면
+    (실측 확인) 토큰 경계 자체가 사라져 오히려 유사도가 더 떨어진다
+    (28.6점). 다른 모델("아이폰16")이나 무관한 상품은 경계 보정을 거쳐도
+    여전히 임계값 미달로 정상 차단된다(실측 66.7점/19점)."""
+    set_ratio = fuzz.token_set_ratio(decision_name, candidate_name)
+    sort_ratio = fuzz.token_sort_ratio(decision_name, candidate_name)
+    if set_ratio < NAME_SIMILARITY_THRESHOLD or sort_ratio < _MIN_TOKEN_SORT_RATIO:
+        spaced_decision = _insert_hangul_digit_boundary_space(decision_name)
+        spaced_candidate = _insert_hangul_digit_boundary_space(candidate_name)
+        set_ratio = fuzz.token_set_ratio(spaced_decision, spaced_candidate)
+        sort_ratio = fuzz.token_sort_ratio(spaced_decision, spaced_candidate)
+    if set_ratio < NAME_SIMILARITY_THRESHOLD:
         return False
-    if fuzz.token_sort_ratio(decision_name, candidate_name) < _MIN_TOKEN_SORT_RATIO:
+    if sort_ratio < _MIN_TOKEN_SORT_RATIO:
         return False
     if model_or_quantity_conflict(decision_name, candidate_name):
         return False

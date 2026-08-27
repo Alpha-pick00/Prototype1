@@ -439,7 +439,17 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     for (const [label, values] of Object.entries(selected)) {
       if (values.length > 0) personaOverride[label] = values[values.length - 1];
     }
-    await runTurn(turn.id, turn.requestQuery, turn.baseQuery, personaOverride, accumulatedFacetAnswers);
+    // forceSkipClarify(2026-08-27, 사용자 리포트 "검색 결과가 하나도 안 뜬다" -
+    // "아이폰 17" 검색 -> AI 상세검색에서 "아이폰 17" 옵션을 고르면 combined가
+    // baseQuery와 우연히 같은 문자열이 돼(둘 다 "아이폰 17") runTurn의
+    // skipIntentCheck 추론(requestQuery !== baseQuery)이 "아직 안 답한 첫
+    // 질의"로 오판했다. looksAmbiguous("아이폰 17")는 여전히 true(토큰 2개)라
+    // checkClarifyFacets를 다시 태워 완전히 같은 되묻기 카드가 무한 반복됐다 -
+    // 사용자는 옵션을 아무리 눌러도 실제 검색 결과를 영영 못 봤다. 이 함수는
+    // 옵션을 실제로 선택해서 호출된 것 자체가 "이미 답했다"는 확정 신호이므로
+    // (searchBroadly의 forceSkipClarify와 같은 논리), 문자열 비교 추론에
+    // 기대지 않고 항상 명시적으로 재질문을 건너뛴다.
+    await runTurn(turn.id, turn.requestQuery, turn.baseQuery, personaOverride, accumulatedFacetAnswers, true);
   };
 
   // AI 상세검색 카드에서 조건을 하나도 안 고르고 "그냥 검색하기"를 누르면

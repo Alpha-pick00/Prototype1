@@ -115,10 +115,13 @@ def test_search_candidates_searches_directly_when_no_base_query(monkeypatch):
 def test_search_candidates_reuses_base_query_search_and_filters_structurally_when_drilled_down(monkeypatch):
     """HITL 드릴다운 후속 턴(query != base_query)이면 재구성된 전체 문자열로
     다시 검색하지 않고, base_query로 넓게 검색한 뒤 사용자가 덧붙인 답을
-    로컬 필터링(_filter_items_by_extra_terms)으로 구조적으로 좁혀야 한다."""
+    로컬 필터링(_filter_items_by_extra_terms)으로 구조적으로 좁혀야 한다.
+    드릴다운 검색은 웹 랭킹 API(search_elevenst_web_ranking)를 쓴다
+    (2026-08-27, "핸드폰" 드릴다운에서 오픈 API 표본에 진짜 상품이 없어
+    항상 0건이었던 문제로 교체됨)."""
     seen = {}
 
-    async def _fake_search(query, limit=10, sort_cd="A"):
+    async def _fake_search(query, limit=10):
         seen["query"] = query
         seen["limit"] = limit
         return [
@@ -128,7 +131,7 @@ def test_search_candidates_reuses_base_query_search_and_filters_structurally_whe
             _item("초코파이 롯데 딸기 300g", 2000, "4"),
         ]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
 
     items = asyncio.run(debate._search_candidates("초코파이 오리온", "초코파이"))
 

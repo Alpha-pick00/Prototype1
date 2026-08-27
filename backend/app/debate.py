@@ -92,9 +92,19 @@ async def _search_candidates(
     목록에 없어 위 트리거를 못 태웠다). adk_pipeline.run_stream이 challenge
     (DeepSeek, 카테고리 무관하게 의미로 판정)까지 다 돌려본 뒤 후보 전부가
     verified=False로 나오면 이 플래그를 강제로 켜고 검색부터 한 번 더
-    돈다 - 단어 목록이 못 잡는 케이스까지 결국 걸러내는 두 번째 안전망."""
+    돈다 - 단어 목록이 못 잡는 케이스까지 결국 걸러내는 두 번째 안전망.
+
+    드릴다운 검색도 웹 랭킹 API로(2026-08-27, 사용자 리포트 - "핸드폰"
+    드릴다운에서 "아이폰17"을 골라도 검색 결과가 안 뜸) - base_query 검색이
+    여전히 11번가 오픈 API(sortCd=A)를 쓰고 있었는데, 실측 확인 결과
+    "핸드폰" 같은 카테고리성 검색어는 오픈 API 90개 표본이 전부 액세서리/
+    잡화(폰가방, 케이스, 거치대 등)뿐이라 사용자가 고른 "아이폰17"에 해당하는
+    진짜 본체 상품이 표본에 아예 없었다 - facet 매칭 로직이 맞아도 애초에
+    맞출 상품이 없으니 필터 결과가 항상 0건이었다. 메인 검색(raw 모드)이
+    이미 이 문제로 웹 랭킹 API(웹사이트 실제 순위)로 소스를 바꿨는데,
+    드릴다운은 그 개선을 못 받고 있었다."""
     if base_query and base_query.strip() and base_query.strip() != query.strip():
-        items = await _search_elevenst_safely(base_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT)
+        items = await elevenst.search_elevenst_web_ranking(base_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT)
         if facet_answers:
             return _filter_items_by_facet_answers(items, facet_answers, query)
         return _filter_items_by_extra_terms(items, query, base_query)
@@ -599,9 +609,23 @@ def _filter_items_by_facet_answers(
     되살려버린다(실측: 아이폰 케이스 90개 중 89개가 그대로 부활). facet
     매칭이 실패해 포기하더라도 "이건 아예 다른 상품"이라는 판정만은 절대
     무를 수 없는 더 강한 신호이므로, 먼저 items 자체에서 걸러낸 뒤에만 그
-    위에서 facet 매칭 성공/포기를 따진다."""
+    위에서 facet 매칭 성공/포기를 따진다.
+
+    관련성 가드 기준값(2026-08-27, 사용자 리포트 - "이미 작성한 쿼리는
+    재작성하지 말고 HITL 하고 싶다고 했는데 이게 HITL이라고 보기 어렵다" -
+    "핸드폰"에서 "아이폰17"을 고르면 query가 "핸드폰 아이폰17"(카테고리어
+    + 선택값을 이어붙인 재작성 문자열)이 되고, 이 문자열 전체를
+    _product_name_matches에 넘기면 진짜 "아이폰 17" 상품명과도 유사도가
+    낮게 나와(실측 17.8점, 임계값 미달) 전부 걸러졌다 - 검색 결과 0건).
+    query 대신 facet_answers에 실제로 선택된 값들(구조 데이터, 예:
+    "아이폰17")만 이어붙여 관련성을 판정한다 - "핸드폰"처럼 사용자가 직접
+    고르지 않은 카테고리어까지 매칭 기준에 섞이지 않아야, 이 필터가
+    "질의 재구성 후 재검색"이 아니라 사용자가 확정한 조건에 대한 구조적
+    필터링(진짜 HITL)이 된다."""
+    selected_values = [v for values in facet_answers.values() for v in values]
+    relevance_query = " ".join(selected_values) or query
     items = [
-        item for item in items if price_table_module._product_name_matches(query, item["product_name"])
+        item for item in items if price_table_module._product_name_matches(relevance_query, item["product_name"])
     ]
     groups = [
         [_normalize_for_match(v) for v in values] for values in facet_answers.values() if values
