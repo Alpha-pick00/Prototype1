@@ -202,7 +202,7 @@ def test_check_clarify_facets_refines_conversational_query_before_search(monkeyp
         seen_search_query["query"] = query
         return []
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
 
     async def _fake_refine(query):
         return "컵"
@@ -219,7 +219,7 @@ def test_check_clarify_facets_returns_empty_immediately_for_greeting(monkeypatch
     async def _boom_search(query, limit=3):
         raise AssertionError("잡담 입력인데 elevenst.search_elevenst가 호출됐다")
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _boom_search)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _boom_search)
 
     async def _boom_facets(query, names):
         raise AssertionError("잡담 입력인데 extract_facets_from_names가 호출됐다")
@@ -909,7 +909,7 @@ def test_check_clarify_facets_attaches_facet_crossfilter_symmetrically(monkeypat
             {"pcode": "4", "product_name": "APPLE 아이폰17 프로 512GB", "total_mall_count": None},
         ]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names):
         return [
@@ -947,7 +947,7 @@ def test_check_clarify_facets_crossfilter_works_between_non_brand_facets(monkeyp
             {"pcode": "4", "product_name": "오리온 초코파이 오리지널 672g", "total_mall_count": None},
         ]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names):
         return [
@@ -974,7 +974,7 @@ def test_check_clarify_facets_orders_facets_from_macro_to_micro(monkeypatch):
     async def _fake_search_danawa(query, limit=3):
         return [{"pcode": "1", "product_name": "오리온 초코파이 바나나 468g", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names):
         # 일부러 미시적인 것부터 거꾸로 반환한다 - 정렬이 실제로 라벨 순서를
@@ -1000,7 +1000,7 @@ def test_check_clarify_facets_orders_phone_model_facet_first(monkeypatch):
     async def _fake_search_danawa(query, limit=3):
         return [{"pcode": "1", "product_name": "삼성전자 갤럭시S25 케이스", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names, required_labels=None):
         return [
@@ -1029,7 +1029,7 @@ def test_check_clarify_facets_never_asks_category(monkeypatch):
     async def _fake_search(query, limit=90):
         return [{"pcode": "1", "product_name": "샤오미 미지아 선풍기", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="카테고리", options=["엉뚱한값"]), ClarifyFacet(label="모델", options=names)]
@@ -1052,7 +1052,7 @@ def test_check_clarify_facets_strips_accessory_options_regardless_of_label(monke
     async def _fake_search(query, limit=90):
         return [{"pcode": "1", "product_name": "아이폰 17 프로 맥스 256GB", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
 
     async def _fake_extract_facets(query, names):
         return [
@@ -1076,7 +1076,7 @@ def test_check_clarify_facets_keeps_accessory_options_when_query_is_accessory_it
     async def _fake_search(query, limit=90):
         return [{"pcode": "1", "product_name": "아이폰 17 클리어 케이스", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="케이스형태", options=["클리어케이스", "젤리케이스", "범퍼케이스"])]
@@ -1102,7 +1102,7 @@ def test_check_clarify_facets_does_not_research_when_category_already_selected(m
         seen_queries.append(query)
         return [{"pcode": "1", "product_name": "샤오미 미지아 선풍기", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="모델", options=names)]
@@ -1150,7 +1150,7 @@ def test_check_clarify_facets_still_searches_when_model_number_leaves_other_axes
     async def _fake_search(query, limit=3):
         return [{"pcode": "1", "product_name": "아이폰 15 프로 256GB 블랙티타늄", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
 
     async def _fake_extract_facets(query, names, required_labels=None):
         return [ClarifyFacet(label="색상", options=["블랙티타늄", "화이트티타늄"])]
@@ -1174,7 +1174,7 @@ def test_check_clarify_facets_uses_static_cache_without_any_search_or_llm_call(m
     async def _boom_search(query, limit=3):
         raise AssertionError("정적 캐시에 있는 카테고리인데 elevenst.search_elevenst가 호출됐다")
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _boom_search)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _boom_search)
 
     async def _boom_facets(query, names):
         raise AssertionError("정적 캐시에 있는 카테고리인데 extract_facets_from_names가 호출됐다")
@@ -1197,7 +1197,7 @@ def test_check_clarify_facets_static_cache_ignores_queries_with_extra_words(monk
         seen.append(query)
         return [{"pcode": "1", "product_name": "아이폰 케이스 실리콘", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
     monkeypatch.setattr(
         "app.agents.deepseek.extract_facets_from_names", lambda query, names: asyncio.sleep(0, result=[])
     )
@@ -1213,7 +1213,7 @@ def test_check_clarify_facets_static_cache_miss_falls_through_to_real_search(mon
     async def _fake_search_danawa(query, limit=3):
         return [{"pcode": "1", "product_name": "코카콜라 350ml 24개", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="용기형태", options=["봉지", "박스"])]
@@ -1232,7 +1232,7 @@ def test_check_clarify_facets_returns_facets_for_ambiguous_query(monkeypatch):
             {"pcode": "2", "product_name": "칠성사이다 190ml", "total_mall_count": None},
         ]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names):
         assert names == ["코카콜라 350ml 24개", "칠성사이다 190ml"]
@@ -1333,7 +1333,7 @@ def test_check_clarify_facets_strips_query_redundant_option_end_to_end(monkeypat
             {"pcode": "2", "product_name": "스탠리 아이스플로우 보틀 473ml", "total_mall_count": None},
         ]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="제품분류", options=["텀블러", "보틀"])]
@@ -1358,7 +1358,7 @@ def test_check_clarify_facets_uses_wider_search_limit_than_the_fast_path(monkeyp
         seen_limits.append(limit)
         return []
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     asyncio.run(check_clarify_facets("음료수"))
 
@@ -1382,7 +1382,7 @@ def test_check_clarify_facets_searches_base_query_instead_of_query(monkeypatch):
             {"pcode": "5", "product_name": "APPLE 아이폰17 프로 512GB", "total_mall_count": None},
         ]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="시리즈", options=names)]
@@ -1416,7 +1416,7 @@ def test_check_clarify_facets_enriches_minority_brand_series_via_per_brand_extra
     async def _fake_search_danawa(query, limit=3):
         return items
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names, required_labels=None):
         # 이 가짜 LLM은 "삼성전자 상품명만 들어오면" 삼성 시리즈만 뽑고(원래
@@ -1501,7 +1501,7 @@ def test_check_clarify_facets_enriches_minority_ecosystem_device_models_via_ecos
             return iphone_supplement_items
         return base_items
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names, required_labels=None):
         has_iphone = any("아이폰" in n for n in names)
@@ -1538,32 +1538,48 @@ def test_check_clarify_facets_enriches_minority_ecosystem_device_models_via_ecos
     assert "아이폰17 프로" in options
 
 
-def test_check_clarify_facets_falls_back_to_unfiltered_when_too_few_matches(monkeypatch):
-    """필터링 결과가 너무 적으면(MIN_FILTERED_CLARIFY_ITEMS 미만) 필터링을
-    포기하고 base_query의 넓은 표본을 그대로 쓴다 - 추가 검색은 하지 않는다."""
+def test_check_clarify_facets_keeps_extra_term_filter_result_even_when_sparse(monkeypatch):
+    """"결과가 적으면 포기하고 원본 표본으로" fallback을 없앤 뒤(2026-08-27,
+    사용자 지적 - "HITL은 순차적으로 진행되어야지 우리 건 fallback 구조잖아")
+    로 회귀 검증한다 - _filter_items_by_extra_terms로 좁힌 결과가 원본보다
+    훨씬 적어도(이 테스트는 5개 중 2개) 그 조건을 무시하고 원본 표본으로
+    되돌리면 안 된다. 사용자가 이미 답한 조건("없는브랜드")은 결과가 좁더라도
+    계속 존중돼야 진짜 순차적 HITL이다. 옵션을 2개로 유지하는 이유 -
+    facet 옵션이 1개뿐이면 _strip_resolved_facets가 "더 물을 필요 없음"으로
+    보고 그 facet 자체를 지운다(별도로 의도된 동작, 이 테스트의 관심사와
+    무관하다)."""
 
     async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "삼성전자 갤럭시S25 256GB", "total_mall_count": None}]
+        return [
+            {"pcode": "1", "product_name": "삼성전자 갤럭시S25 256GB 없는브랜드 실버", "total_mall_count": None},
+            {"pcode": "2", "product_name": "삼성전자 갤럭시S25 256GB 없는브랜드 블랙", "total_mall_count": None},
+            {"pcode": "3", "product_name": "삼성전자 갤럭시S25 256GB 다른브랜드 실버", "total_mall_count": None},
+            {"pcode": "4", "product_name": "삼성전자 갤럭시S25 256GB 다른브랜드 블랙", "total_mall_count": None},
+            {"pcode": "5", "product_name": "삼성전자 갤럭시S25 256GB 세번째브랜드", "total_mall_count": None},
+        ]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names):
-        return [ClarifyFacet(label="시리즈", options=names)]
+        return [ClarifyFacet(label="색상", options=names)]
 
     monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
 
     result = asyncio.run(check_clarify_facets("핸드폰 없는브랜드", base_query="핸드폰"))
 
-    # "없는브랜드"로 필터링하면 0개가 남아 MIN_FILTERED_CLARIFY_ITEMS(3) 미만이라
-    # 필터링 전 표본(1개)을 그대로 써야 한다 - 빈 리스트가 되면 안 된다.
-    assert result.options.facets[0].options == ["삼성전자 갤럭시S25 256GB"]
+    # "없는브랜드"로 좁히면 2개만 남는다(원본 5개가 아니라) - fallback이
+    # 없으므로 이 좁혀진 결과가 그대로 유지돼야 한다.
+    assert result.options.facets[0].options == [
+        "삼성전자 갤럭시S25 256GB 없는브랜드 실버",
+        "삼성전자 갤럭시S25 256GB 없는브랜드 블랙",
+    ]
 
 
 def test_check_clarify_facets_returns_empty_when_deepseek_finds_nothing(monkeypatch):
     async def _fake_search_danawa(query, limit=3):
         return [{"pcode": "1", "product_name": "테스트 상품", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
     monkeypatch.setattr(
         "app.agents.deepseek.extract_facets_from_names", lambda query, names: asyncio.sleep(0, result=[])
     )
@@ -1580,7 +1596,7 @@ def test_decide_clarify_endpoint_returns_clarify_response(monkeypatch):
     async def _fake_search_danawa(query, limit=3):
         return [{"pcode": "1", "product_name": "코카콜라 350ml", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search_danawa)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="브랜드", options=["코카콜라", "칠성사이다"])]
@@ -1622,7 +1638,7 @@ def test_run_elevenst_only_debate_never_calls_deepseek_facets_even_for_short_que
     async def _search_elevenst(query, limit=10):
         return []
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _search_elevenst)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _search_elevenst)
 
     with pytest.raises(RuntimeError, match="11번가에서 '음료수'에 대해 관련성 있는 상품을 찾지 못했습니다."):
         asyncio.run(run_elevenst_only_debate("음료수"))

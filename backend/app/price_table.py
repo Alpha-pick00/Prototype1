@@ -42,30 +42,21 @@ async def _search_elevenst_items(query: str, limit: int) -> list[elevenst.Eleven
     예외를 던지지 않고 빈 리스트를 반환한다(호출자가 폴백을 따로 두지 않아도
     되도록).
 
-    보정 검색(2026-08-26, "아이폰 17"을 치면 되묻는 옵션이 폰 스펙이 아니라
-    "케이스형태"/"패턴" 같은 액세서리 축으로 나오던 문제) - facet 추출용
-    표본이 전부 액세서리 지시어를 달고 있으면 sortCd="H"(높은가격순)로 한 번
-    더 찾아 합친다. `_search_candidates`가 메인 검색에서 쓰는 것과 동일한
-    트리거(most_candidates_look_like_accessories)다 - 표본 자체가 액세서리
-    투성이면 거기서 뽑히는 facet도 액세서리 축(케이스/충전기 등)일 수밖에
-    없으므로, 메인 검색과 같은 이유로 여기도 보정이 필요하다."""
+    웹 랭킹 API로 교체(2026-08-27, 사용자 지적 - "HITL은 순차적으로 진행
+    되어야지 우리 건 fallback 구조잖아") - 오픈 API(sortCd=A)는 "핸드폰"
+    같은 카테고리성 검색어에서 표본 90개가 전부 액세서리/잡화뿐이라 되묻기
+    옵션도, 그 옵션을 고른 뒤 다음 라운드 표본도 진짜 상품을 하나도 못
+    담는 경우가 실측 확인됐다(예: "아이폰17"을 골라도 다음 라운드 표본에
+    진짜 아이폰이 0개). 메인 검색이 이미 이 이유로 웹 랭킹 API(웹사이트
+    실제 순위)로 소스를 바꿨는데, 되묻기는 그 개선을 못 받고 있었다 -
+    표본 자체에 진짜 상품이 없으면 아무리 필터링 로직을 순차적으로
+    고쳐도 보여줄 게 없다. 웹 랭킹 API는 이미 웹사이트 순위 그대로라
+    sortCd="H" 보정 재검색(옛 코드)이 더 이상 필요 없다."""
     try:
-        items = await elevenst.search_elevenst(query, limit=limit)
-    except elevenst.ElevenstSearchBlocked:
-        logger.warning("elevenst search blocked for query=%r", query)
-        return []
+        return await elevenst.search_elevenst_web_ranking(query, limit=limit)
     except Exception:
-        logger.exception("elevenst search crashed for query=%r", query)
+        logger.exception("elevenst 웹 랭킹 검색 crashed for query=%r", query)
         return []
-
-    if most_candidates_look_like_accessories(query, items):
-        try:
-            high_price_items = await elevenst.search_elevenst(query, limit=limit, sort_cd="H")
-        except Exception:
-            logger.exception("elevenst 보정 검색(sortCd=H) 실패 for query=%r", query)
-            return items
-        items = _dedupe_by_product_code(items + high_price_items)
-    return items
 
 
 # 2026-08-24 실측("아이간식" 검색 시 "자동 제면기 파스타 기계 식사준비

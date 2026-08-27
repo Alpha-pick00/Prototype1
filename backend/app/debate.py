@@ -554,19 +554,19 @@ def _filter_items_by_extra_terms(
 ) -> list[elevenst.ElevenstSearchItem]:
     """base_query로 얻은(캐시 재사용) 넓은 표본을, 사용자가 그 뒤에 덧붙인
     단어들(예: base_query="핸드폰", query="핸드폰 삼성전자"의 "삼성전자")로
-    상품명을 걸러 좁힌다 - 네트워크 요청 없이 순수 로컬 필터링."""
+    상품명을 걸러 좁힌다 - 네트워크 요청 없이 순수 로컬 필터링.
+
+    "결과 적으면 포기하고 원본 표본 반환" fallback 제거(2026-08-27, 사용자
+    지적 - "HITL은 순차적으로 진행되어야지 우리 건 fallback 구조잖아",
+    _filter_items_by_facet_answers와 같은 원칙) - 사용자가 이미 덧붙인
+    단어는 결과가 좁아지더라도 절대 무시하지 않는다."""
     base_tokens = {_normalize_for_match(t) for t in base_query.split()}
     extra_tokens = [
         _normalize_for_match(t) for t in query.split() if _normalize_for_match(t) not in base_tokens
     ]
     if not extra_tokens:
         return items
-    filtered = [
-        item
-        for item in items
-        if all(term in _normalize_for_match(item["product_name"]) for term in extra_tokens)
-    ]
-    return filtered if len(filtered) >= MIN_FILTERED_CLARIFY_ITEMS else items
+    return [item for item in items if all(term in _normalize_for_match(item["product_name"]) for term in extra_tokens)]
 
 
 def _filter_items_by_facet_answers(
@@ -577,8 +577,7 @@ def _filter_items_by_facet_answers(
     고른 값끼리는 OR(하나만 상품명에 있어도 통과 - "빨강 또는 파랑"), 서로
     다른 facet끼리는 _filter_items_by_extra_terms와 같은 AND(모든 facet을
     만족해야 통과)로 좁힌다. _filter_items_by_extra_terms처럼 순수 로컬
-    필터링(추가 네트워크 요청 없음)이고, 결과가 너무 적으면(표본이 좁아
-    facet 품질이 나빠질 수 있음) 필터링을 포기하고 원래 표본을 그대로 쓴다.
+    필터링(추가 네트워크 요청 없음)이다.
 
     관련성 가드(2026-08-25 사용자 리포트 - "아이폰 17 256GB 자급제"를 facet으로
     좁혀도 카메라 렌즈 보호필름/케이스/심지어 무선마이크까지 추천됨) - 이
@@ -600,17 +599,6 @@ def _filter_items_by_facet_answers(
     일반적으로 적용된다(같은 함수가 이 세션에서 "아이폰 17 256GB 자급제"
     단발 검색 19개 후보 전부를 정확히 걸러낸 걸 실측 확인함).
 
-    이 가드는 아래 "결과가 너무 적으면 포기" 로직보다 먼저, 그리고 그 로직과
-    무관하게 적용해야 한다(실측 확인된 두 번째 버그) - facet 값(예: "자급제")이
-    이 90개 표본의 어느 상품명에도 문자 그대로 등장하지 않으면(실제로 자주
-    있음 - 표기가 다르거나 다들 생략) filtered가 MIN_FILTERED_CLARIFY_ITEMS
-    미만이 되어 통째로 "포기하고 원래 표본"으로 돌아가는데, 관련성 가드를
-    filtered 안쪽에서만 걸면 그 "포기" 분기가 무관한 상품까지 전부
-    되살려버린다(실측: 아이폰 케이스 90개 중 89개가 그대로 부활). facet
-    매칭이 실패해 포기하더라도 "이건 아예 다른 상품"이라는 판정만은 절대
-    무를 수 없는 더 강한 신호이므로, 먼저 items 자체에서 걸러낸 뒤에만 그
-    위에서 facet 매칭 성공/포기를 따진다.
-
     관련성 가드 기준값(2026-08-27, 사용자 리포트 - "이미 작성한 쿼리는
     재작성하지 말고 HITL 하고 싶다고 했는데 이게 HITL이라고 보기 어렵다" -
     "핸드폰"에서 "아이폰17"을 고르면 query가 "핸드폰 아이폰17"(카테고리어
@@ -621,7 +609,19 @@ def _filter_items_by_facet_answers(
     "아이폰17")만 이어붙여 관련성을 판정한다 - "핸드폰"처럼 사용자가 직접
     고르지 않은 카테고리어까지 매칭 기준에 섞이지 않아야, 이 필터가
     "질의 재구성 후 재검색"이 아니라 사용자가 확정한 조건에 대한 구조적
-    필터링(진짜 HITL)이 된다."""
+    필터링(진짜 HITL)이 된다.
+
+    "결과 적으면 포기하고 원본 표본 반환" fallback 제거(2026-08-27, 사용자
+    지적 - "HITL은 순차적으로 진행되어야지 우리 건 fallback 구조잖아").
+    예전엔 필터링 결과가 MIN_FILTERED_CLARIFY_ITEMS(3개) 미만이면 조건
+    자체를 버리고 원본 표본을 그대로 돌려줬다 - 사용자가 "아이폰17"을
+    명시적으로 선택했는데 그 조건에 맞는 상품이 적다는 이유로 조건을
+    무시하고 아무 상품이나 보여주는 셈이었다. 이 함수는 되묻기(다음 facet
+    질문을 만들 표본을 좁힘)와 최종 검색(사용자가 확정한 조건으로 실제
+    후보를 좁힘) 양쪽에 다 쓰이는데, 어느 쪽이든 "사용자가 이미 답한 조건은
+    절대 무시하지 않는다"가 원칙이어야 진짜 순차적 HITL이다 - 조건에 맞는
+    게 하나도 없으면(빈 리스트) 그 사실 자체를 있는 그대로 위로 돌려보내
+    호출부가 "그 조건에는 결과가 없습니다"를 정직하게 반영하게 한다."""
     selected_values = [v for values in facet_answers.values() for v in values]
     relevance_query = " ".join(selected_values) or query
     items = [
@@ -632,7 +632,7 @@ def _filter_items_by_facet_answers(
     ]
     if not groups:
         return items
-    filtered = [
+    return [
         item
         for item in items
         if all(
@@ -640,7 +640,6 @@ def _filter_items_by_facet_answers(
             for group in groups
         )
     ]
-    return filtered if len(filtered) >= MIN_FILTERED_CLARIFY_ITEMS else items
 
 
 def _items_for_brand(brand: str, names: list[str]) -> list[str]:
@@ -1160,6 +1159,19 @@ async def check_clarify_facets(
     names = [item["product_name"] for item in items]
     facets = await _extract_facets(query, names, persona)
     facets = [f for f in facets if f.label != "카테고리"]
+    # 답변된 축 전체 닫기(2026-08-27, 사용자 지적 - "HITL은 순차적으로 진행
+    # 되어야지 우리 건 fallback 구조잖아") - "핸드폰 기종"처럼 사용자가 이미
+    # 명확히 하나를 확정한 축은 다음 라운드에 다시 묻지 않아야 한다
+    # (_facet_resolved/_strip_resolved_facets가 이미 정의돼 있었는데 여기
+    # 파이프라인에 연결이 안 돼 있던 죽은 코드였다). _strip_query_answered_
+    # options보다 먼저 적용해야 한다 - _facet_resolved는 "사용자가 고른
+    # 값 자체가 원본 옵션 목록에 그대로 있는지"로 판정하는데, 먼저
+    # _strip_query_answered_options를 거치면 방금 고른 값("아이폰17")이
+    # 이미 옵션 목록에서 제거된 뒤라(정확히 그 값과 같은 옵션은 원래
+    # 유지되지만, "핸드폰 아이폰17"이라는 재작성 문자열 자체는 옵션 어디와도
+    # 정확히 안 맞아) _facet_resolved가 판정 근거를 잃어 계속 False로
+    # 나온다(실측 확인 - 이 순서였을 때 "핸드폰 기종" 축이 계속 다시 떴다).
+    facets = _strip_resolved_facets(query, facets)
     facets = _strip_query_answered_options(query, facets)
     facets = _strip_cross_brand_options(query, facets)
     facets = _strip_accessory_options(query, facets)
