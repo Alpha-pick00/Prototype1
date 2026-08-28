@@ -132,7 +132,12 @@ const ProductThumbnail = ({
   const [errored, setErrored] = useState(false);
   // 2026-08-24 사용자 요청("사진 크기만 더 크게") - md 96px -> 128px,
   // sm 64px -> 96px.
-  const dim = size === 'sm' ? 'w-24 h-24' : 'w-32 h-32';
+  // 2026-08-28 사용자 요청("모바일만 사진을 아예 크게 키워서 채워봐") -
+  // size="md"는 현재 이 파일에서 메인 AI 추천 카드 하나만 쓰고 있어서(다른
+  // 후보 카드/스타일 가이드 카드는 전부 size="sm"), 여기서 모바일 전용으로
+  // 정사각형을 카드 폭 전체로 키워도 다른 카드에 영향이 없다. sm(640px)
+  // 이상에서는 기존 128px 정사각형으로 되돌아간다 - 데스크톱은 그대로.
+  const dim = size === 'sm' ? 'w-24 h-24' : 'w-full aspect-square sm:w-32 sm:h-32';
   const badgeDim = size === 'sm' ? 'w-6 h-6 text-xs' : 'w-7 h-7 text-sm';
   const iconDim = size === 'sm' ? 'w-5 h-5' : 'w-7 h-7';
 
@@ -557,14 +562,14 @@ export const SearchResults = ({
     if (!url) return null;
     if (url === decision.url) {
       return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-neutral-950 text-white">
+        <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded-full text-[10px] font-medium bg-neutral-950 text-white">
           AI 1위 추천
         </span>
       );
     }
     if (url === mostSatisfiedUrl) {
       return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#4ADE80]/15 text-[#166534]">
+        <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#4ADE80]/15 text-[#166534]">
           만족도 최고
         </span>
       );
@@ -586,27 +591,42 @@ export const SearchResults = ({
           AI추천
         </button>
       </div>
+      {/* 모바일에서는 세로로 쌓는다(2026-08-28 사용자 요청 - "사진 밑에도
+          글자 들어가게 해도 돼, 지금 상품단위로 짤린 것 같다") - 좁은 화면에
+          [이미지 | 텍스트 | 가격]을 한 줄에 다 우겨넣으니(flex-1 fix 이후에도)
+          텍스트가 쓸 수 있는 폭 자체가 너무 좁아 여전히 답답해 보였다. sm
+          (640px) 미만에서는 이미지 위, 텍스트 아래, 가격 그 아래로 쌓아 각
+          영역이 카드 전체 너비를 쓰게 하고, sm 이상(태블릿/데스크톱)에서는
+          기존 가로 배치 그대로 되돌린다. */}
       <a
         href={displayed.url ?? undefined}
         target="_blank"
         rel="noopener noreferrer"
-        className="group flex items-start justify-between gap-4 mb-6"
+        className="group flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6"
       >
-        <div className="flex items-start gap-3 min-w-0">
+        {/* flex-1 없이 min-w-0만 있으면(2026-08-28 사용자 리포트: "글자가
+            한글자씩 끊어져서 보임") 옆의 shrink-0 가격 칼럼에 밀려 이 그룹이
+            거의 0px까지 눌린다 - min-w-0은 "0px까지 줄어들 수 있다"만
+            허용할 뿐 "그만큼 줄어들어야 한다"는 아니라, flex-1로 남는
+            공간을 정당하게 가져가게 해야 한다. */}
+        <div className="flex flex-col sm:flex-row sm:items-start gap-3 min-w-0 flex-1">
           <ProductThumbnail
             src={displayed.image_url}
             alt={displayed.product_name ?? ''}
             size="md"
             rank={displayed.url ? rankByUrl[displayed.url] : undefined}
           />
-          <div className="min-w-0">
+          <div className="min-w-0 w-full">
             <TopBadge url={displayed.url} />
-            <p className="mt-1 text-lg font-medium text-neutral-950">{displayed.product_name}</p>
-            <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
+            {/* break-keep(word-break: keep-all) 없이 컨테이너가 좁아지면
+                한글이 단어/음절 단위가 아니라 글자 하나마다 줄바꿈된다 -
+                아래 reasoning 문단엔 이미 있었는데 상품명엔 빠져 있었다. */}
+            <p className="mt-1 text-lg font-medium text-neutral-950 break-keep">{displayed.product_name}</p>
+            <p className="text-sm font-light text-neutral-500 break-keep">{displayed.retailer}</p>
             <p className="mt-1.5 text-sm font-light text-neutral-600 leading-relaxed break-keep">{displayed.reasoning}</p>
           </div>
         </div>
-        <div className="shrink-0 flex items-center gap-2">
+        <div className="flex items-center justify-end gap-2 sm:shrink-0">
           <span className="text-xl font-medium text-neutral-950 whitespace-nowrap">
             {displayed.price || '가격 미확인'}
           </span>
@@ -649,11 +669,11 @@ export const SearchResults = ({
                       size="sm"
                       rank={matched.url ? rankByUrl[matched.url] : undefined}
                     />
-                    <div className="min-w-0 flex flex-col items-start gap-1">
+                    <div className="min-w-0 flex-1 flex flex-col items-start gap-1">
                       <TopBadge url={matched.url} />
-                      <span className="text-xs font-medium text-neutral-950">{g.label}</span>
-                      <span className="text-xs font-light text-neutral-500 leading-relaxed">{g.description}</span>
-                      <span className="text-xs font-light text-neutral-600 mt-1">
+                      <span className="text-xs font-medium text-neutral-950 break-keep">{g.label}</span>
+                      <span className="text-xs font-light text-neutral-500 leading-relaxed break-keep">{g.description}</span>
+                      <span className="text-xs font-light text-neutral-600 mt-1 break-keep">
                         {matched.product_name} · {matched.price || '가격 미확인'}
                       </span>
                     </div>
