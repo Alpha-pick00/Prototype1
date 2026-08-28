@@ -1028,6 +1028,7 @@ async def _extract_facets(
         facets = [ClarifyFacet(**f) for f in cached["facets"]]
     else:
         facets = await deepseek.extract_facets_from_names(query, names)
+        facets = _strip_device_model_facet_duplicating_own_series(facets)
         facets = _strip_nonexistent_options(facets, names)
         facets = await _enrich_facets_per_brand(facets, names, query)
         facets = await _enrich_device_models_by_ecosystem(facets, names, query)
@@ -1268,6 +1269,59 @@ def _strip_accessory_options(query: str, facets: list[ClarifyFacet]) -> list[Cla
             }
             options_by_selection = {k: v for k, v in filtered.items() if v} or None
         result.append(ClarifyFacet(label=facet.label, options=kept, options_by_selection=options_by_selection))
+    return result
+
+
+# "기종"/"핸드폰 기종" 라벨은 원래 액세서리(케이스 등)가 "어떤 기기에 맞는지"를
+# 뜻하는 기준인데, DeepSeek이 본품(노트북·가전 등) 검색에서도 상품명에 "갤럭시"/
+# "아이폰" 같은 브랜드 계열 단어가 섞여 있으면(예: "갤럭시북", "갤럭시 워치") 그
+# 상품 자체를 부속품으로 오인해 이 라벨을 만드는 오분류가 실측 확인됐다
+# (2026-08-28 - "노트북" 검색에 "핸드폰 기종: 아이폰/갤럭시/갤럭시북4..."가
+# 섞여 나옴, temperature=0 + 프롬프트 금지 지시를 추가해도 낮은 빈도로 재현됨 -
+# LLM 프롬프트만으로는 100% 결정적으로 막을 수 없어 코드 레벨 안전망이 필요).
+#
+# 라벨명만 보고 무조건 제거하면 안 된다 - "아이폰 17"처럼 핸드폰 본품을 검색할
+# 때는 같은 "핸드폰 기종" 라벨이 정상적으로 "그 핸드폰의 세부 모델"(아이폰 17
+# 프로/프로맥스 등)을 뜻하는 유효한 축이라 지우면 회귀가 난다
+# (test_check_clarify_facets_strips_accessory_options_regardless_of_label로
+# 고정된 케이스). 두 가지 결정적 신호로 오분류를 판별한다:
+# 1) "기종" 옵션 값이 이미 다른 facet(시리즈/모델)의 옵션과 겹치면 그 상품
+#    자체(예: "갤럭시북4")를 기종 값으로 잘못 넣은 것이다.
+# 2) 값이 브랜드 토큰(아이폰/갤럭시 등, exclusive_tokens의 폰 브랜드 그룹) 뒤에
+#    공백이나 숫자 없이 바로 다른 한글이 붙어 있으면(예: "갤럭시북4" - "갤럭시"
+#    뒤에 곧장 "북") 그 자체가 별개 상품 라인명이지 "갤럭시 폰의 특정 모델"이
+#    아니다(진짜 핸드폰 모델은 "갤럭시 S25", "아이폰 17"처럼 브랜드 뒤에
+#    공백+모델명 또는 숫자가 온다) - 이 신호는 1)과 달리 다른 facet에 그
+#    복합어가 전혀 안 뽑힌 경우(위 "갤럭시북만 시리즈에서 빠진" 사례)도 잡는다.
+# 둘 중 하나라도 과반이면 라벨 전체를 버린다(부분 오염만으로는 정상 축을
+# 살려둔다) - 2026-08-28, "노트북"/"냉장고" 등 본품 검색에서 반복 재현.
+_DEVICE_MODEL_FACET_LABELS = {"기종", deepseek._DEVICE_MODEL_LABEL, "호환기종"}
+_PHONE_BRAND_TOKENS = ("아이폰", "갤럭시", "샤오미", "화웨이")
+_PHONE_BRAND_SUFFIXED_PATTERN = re.compile(
+    "(?:" + "|".join(_PHONE_BRAND_TOKENS) + r")(?![\s0-9]|$)[가-힣]"
+)
+
+
+def _looks_like_own_product_line_not_phone_model(value: str) -> bool:
+    """값이 폰 브랜드 토큰으로 시작하지만 그 뒤에 공백/숫자 없이 다른
+    한글이 바로 이어지면(예: "갤럭시북4") 실제 핸드폰 모델명이 아니라 다른
+    상품 라인명으로 판단한다."""
+    return bool(_PHONE_BRAND_SUFFIXED_PATTERN.match(value.strip()))
+
+
+def _strip_device_model_facet_duplicating_own_series(facets: list[ClarifyFacet]) -> list[ClarifyFacet]:
+    own_product_values: set[str] = set()
+    for facet in facets:
+        if facet.label not in _DEVICE_MODEL_FACET_LABELS:
+            own_product_values.update(_normalize_for_match(o) for o in facet.options)
+    result: list[ClarifyFacet] = []
+    for facet in facets:
+        if facet.label in _DEVICE_MODEL_FACET_LABELS and facet.options:
+            overlaps_own_series = sum(1 for o in facet.options if _normalize_for_match(o) in own_product_values)
+            looks_like_product_line = sum(1 for o in facet.options if _looks_like_own_product_line_not_phone_model(o))
+            if max(overlaps_own_series, looks_like_product_line) / len(facet.options) >= 0.5:
+                continue
+        result.append(facet)
     return result
 
 

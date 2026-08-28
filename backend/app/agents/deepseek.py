@@ -275,6 +275,13 @@ async def extract_facets_from_names(
         response = await client.chat.completions.create(
             model=settings.deepseek_model,
             messages=[{"role": "user", "content": prompt}],
+            # temperature=0(2026-08-28 실측) - 이 호출은 temperature
+            # 기본값(비결정적)이라 같은 검색어·같은 상품명 표본을 줘도 매번
+            # 다른 facet 축 조합이 나왔다(예: "노트북" 검색이 "시리즈"를
+            # 포함하기도, "부가기능"만 내고 "시리즈"를 빼기도 했다 - 3회
+            # 반복 호출로 재현 확인). "브랜드 -> 모델 -> 상세모델"처럼 축
+            # 순서/구성이 매번 안정적으로 나와야 화면이 튀지 않는다.
+            temperature=0,
         )
         data = parse_json_object(response.choices[0].message.content or "")
         allowed_labels = set(required_labels) if required_labels else None

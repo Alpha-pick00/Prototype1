@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from app.debate import (
     _enrich_facets_per_brand,
     _MAX_BRAND_ENRICH_FANOUT,
+    _strip_device_model_facet_duplicating_own_series,
     _strip_nonexistent_options,
     _strip_query_answered_options,
     check_clarify_facets,
@@ -1107,6 +1108,63 @@ def test_check_clarify_facets_strips_accessory_options_regardless_of_label(monke
     by_label = {f.label: f for f in result.options.facets}
     assert "제품분류" not in by_label
     assert by_label["핸드폰 기종"].options == ["아이폰 17 프로", "아이폰 17 프로 맥스", "아이폰 16"]
+
+
+def test_strip_device_model_facet_removes_label_that_duplicates_own_series():
+    """2026-08-28 실측 - "노트북" 검색에서 DeepSeek이 "핸드폰 기종" 라벨에
+    노트북 자신의 시리즈명("갤럭시북4" 등)을 잘못 넣는 오분류가 재현됐다
+    (상품명에 "갤럭시"가 들어간 걸 보고 부속품으로 오인). "기종" 옵션이 이미
+    다른 facet(시리즈)의 옵션과 대부분 겹치면 그 라벨을 통째로 버린다."""
+    facets = [
+        ClarifyFacet(label="시리즈", options=["갤럭시북4", "갤럭시북5", "그램북", "맥북에어"]),
+        ClarifyFacet(label="핸드폰 기종", options=["갤럭시북4", "갤럭시북5", "갤럭시북3 울트라"]),
+        ClarifyFacet(label="용량", options=["256GB", "512GB"]),
+    ]
+
+    result = _strip_device_model_facet_duplicating_own_series(facets)
+
+    labels = [f.label for f in result]
+    assert "핸드폰 기종" not in labels
+    assert "시리즈" in labels
+    assert "용량" in labels
+
+
+def test_strip_device_model_facet_removes_label_when_options_look_like_own_product_line():
+    """2026-08-28 실측 - "노트북" 검색에서 DeepSeek이 "갤럭시북" 계열을
+    "시리즈" facet에서 통째로 빼고 "핸드폰 기종"에만 넣는 경우도 재현됐다
+    (다른 facet과 겹치는 값이 하나도 없어 overlap 판정만으로는 못 잡음).
+    값 자체가 폰 브랜드 토큰 뒤에 공백/숫자 없이 다른 한글이 바로 붙어
+    있으면("갤럭시북4") 진짜 핸드폰 모델명이 아니라고 패턴으로 판별한다."""
+    facets = [
+        ClarifyFacet(label="시리즈", options=["베이직북", "맥북에어", "그램북"]),
+        ClarifyFacet(
+            label="핸드폰 기종",
+            options=["갤럭시북4", "갤럭시북5", "갤럭시북3 울트라", "갤럭시북5 프로"],
+        ),
+        ClarifyFacet(label="용량", options=["256GB", "512GB"]),
+    ]
+
+    result = _strip_device_model_facet_duplicating_own_series(facets)
+
+    labels = [f.label for f in result]
+    assert "핸드폰 기종" not in labels
+    assert "시리즈" in labels
+
+
+def test_strip_device_model_facet_keeps_label_for_genuine_accessory_search():
+    """"아이폰 17"처럼 핸드폰 본품을 검색할 때는 "핸드폰 기종" 라벨이 그
+    핸드폰의 세부 모델(다른 facet과 안 겹침)을 정상적으로 가리키므로 지우면
+    안 된다 - test_check_clarify_facets_strips_accessory_options_regardless_
+    of_label과 같은 시나리오."""
+    facets = [
+        ClarifyFacet(label="핸드폰 기종", options=["아이폰 17 프로", "아이폰 17 프로 맥스", "아이폰 16"]),
+        ClarifyFacet(label="용량", options=["256GB", "512GB"]),
+    ]
+
+    result = _strip_device_model_facet_duplicating_own_series(facets)
+
+    labels = [f.label for f in result]
+    assert "핸드폰 기종" in labels
 
 
 def test_check_clarify_facets_keeps_accessory_options_when_query_is_accessory_itself(monkeypatch):
