@@ -496,8 +496,9 @@ def test_run_prefers_deepseek_relevance_rescue_candidate_matching_query_brand(mo
 def test_run_keeps_all_deepseek_relevance_rescue_candidates_when_none_match_query_brand(monkeypatch):
     """DeepSeek이 골라준 후보 중 질의 첫 어절과 일치하는 게 하나도 없으면
     (검색 API 표본에 애초에 그 브랜드가 없던 경우, 또는 질의 첫 어절이
-    브랜드가 아닌 경우) 브랜드 우선순위 필터를 적용하지 않고 DeepSeek 판정을
-    그대로 쓴다 - 관련 상품 자체가 있는데 엉뚱하게 다 걸러지면 안 된다."""
+    브랜드가 아닌 경우) 다나와 보조 검증도 실패/빈 결과면 브랜드 우선순위
+    필터를 적용하지 않고 DeepSeek 판정을 그대로 쓴다 - 관련 상품 자체가
+    있는데 엉뚱하게 다 걸러지면 안 된다."""
 
     items = [_item("아무 브랜드 비데 상품", 200000, code="1")]
 
@@ -516,9 +517,109 @@ def test_run_keeps_all_deepseek_relevance_rescue_candidates_when_none_match_quer
 
     monkeypatch.setattr(adk_pipeline.deepseek, "filter_relevant_indices", _fake_filter_relevant_indices)
 
+    async def _fake_search_danawa(query, limit=20):
+        return []  # 다나와에도 해당 브랜드 상품이 없다고 가정
+
+    monkeypatch.setattr(adk_pipeline.danawa, "search_danawa", _fake_search_danawa)
+
     result = asyncio.run(adk_pipeline.run("콜러 비데 노브 전기식"))
 
     assert result.decision.product_name == "아무 브랜드 비데 상품"
+
+
+def test_run_rescues_brand_match_from_danawa_when_elevenst_sample_has_none(monkeypatch):
+    """2026-08-28, 검색 소스 확장 - 11번가 표본(웹 랭킹 API) 자체에 질의
+    브랜드 상품이 하나도 없을 때(1000개 벤치마크 재조사 92건 중 19건이 이
+    패턴), 다나와(보조 검증 소스)에서 같은 브랜드 상품이 실제로 있는지
+    확인한다. 있으면 그 후보로 편입해 브랜드 우선순위 재정렬의 재료로
+    쓴다 - "11번가에 없다"와 "시중에 아예 없다"를 구분하지 못하던 한계를
+    좁힌다."""
+
+    items = [_item("전혀 다른 브랜드 비데 상품", 200000, code="1")]
+
+    async def _search(query, limit):
+        return items
+
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _search)
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
+    # 11번가 표본 재검증(1개 후보)과 다나와 후보 재검증(구조적 필터를 못
+    # 통과했을 때) 둘 다 이 함수를 거친다 - product_names 개수로 어느
+    # 호출인지 구분해 각각 "관련 있다"고 답한다(둘 다 표본이 1개뿐이라
+    # 인덱스는 항상 [0]).
+    async def _fake_filter_relevant_indices(query, product_names):
+        return [0]
+
+    monkeypatch.setattr(adk_pipeline.deepseek, "filter_relevant_indices", _fake_filter_relevant_indices)
+
+    from fetchers.danawa import DanawaSearchItem
+
+    async def _fake_search_danawa(query, limit=20):
+        return [
+            DanawaSearchItem(
+                product_id="9001",
+                # 구조적 필터(_product_name_matches)를 의도적으로 못 통과하는
+                # 표기(실측 사례처럼 자유 검색어 vs 상세 스펙 상품명 차이를
+                # 흉내) - DeepSeek 의미 재검증 경로를 태우기 위함.
+                product_name="콜러 1292297-CP 화장실 및 비데 크롬",
+                price_krw=350000,
+                url="https://prod.danawa.com/info/?pcode=9001",
+                image_url=None,
+            )
+        ]
+
+    monkeypatch.setattr(adk_pipeline.danawa, "search_danawa", _fake_search_danawa)
+
+    result = asyncio.run(adk_pipeline.run("콜러 비데 노브 전기식"))
+
+    assert result.decision.product_name == "콜러 1292297-CP 화장실 및 비데 크롬"
+
+
+def test_run_ignores_danawa_rescue_result_with_quantity_conflict(monkeypatch):
+    """다나와 보조 검증 결과도 model_or_quantity_conflict(결정적 규칙)를
+    거친다 - 브랜드는 맞아도 수량/스펙이 명시적으로 다르면 편입하지 않는다."""
+
+    items = [_item("전혀 다른 브랜드 콜라 500ml", 2000, code="1")]
+
+    async def _search(query, limit):
+        return items
+
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _search)
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
+    async def _fake_filter_relevant_indices(query, product_names):
+        return [0]
+
+    monkeypatch.setattr(adk_pipeline.deepseek, "filter_relevant_indices", _fake_filter_relevant_indices)
+
+    from fetchers.danawa import DanawaSearchItem
+
+    async def _fake_search_danawa(query, limit=20):
+        return [
+            DanawaSearchItem(
+                product_id="9002",
+                product_name="코카콜라 제로 1.5L",  # 브랜드는 맞지만 용량 충돌(500ml vs 1.5L)
+                price_krw=3000,
+                url="https://prod.danawa.com/info/?pcode=9002",
+                image_url=None,
+            )
+        ]
+
+    monkeypatch.setattr(adk_pipeline.danawa, "search_danawa", _fake_search_danawa)
+
+    result = asyncio.run(adk_pipeline.run("코카콜라 500ml"))
+
+    # 다나와 후보가 수량 충돌로 걸러졌으니, 11번가 원래 DeepSeek 후보(브랜드는
+    # 안 맞지만 그나마 유일한 후보)가 그대로 유지돼야 한다.
+    assert result.decision.product_name == "전혀 다른 브랜드 콜라 500ml"
 
 
 def test_run_falls_back_to_original_when_deepseek_relevance_rescue_finds_none(monkeypatch):

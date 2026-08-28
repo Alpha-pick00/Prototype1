@@ -64,7 +64,7 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types
 from pydantic import BaseModel
 
-from fetchers import elevenst
+from fetchers import danawa, elevenst
 
 from . import llm_cache
 from . import price_table as price_table_module
@@ -102,6 +102,24 @@ _MAX_CHALLENGE_CANDIDATES = 10
 # 낮게 나올 수 있어, 10%는 "카테고리성 검색어만 걸러내고 정밀도가 떨어지는
 # 정상 케이스는 건드리지 않는" 절충값이다.
 _CATEGORY_QUERY_MIN_MATCH_RATIO = 0.1
+
+# 다나와 보조 검증(2026-08-28) - fetchers.danawa.DanawaSearchItem을 11번가
+# 후보와 같은 스키마(elevenst.ElevenstSearchItem)로 맞춰, _FilterMergeNode의
+# 브랜드 우선순위 재정렬이 그대로 재사용할 수 있게 한다. seller는 "다나와"로
+# 고정해 프론트가 어느 소스에서 온 후보인지 구분할 수 있게 한다(11번가는
+# 실제 셀러명이 들어간다). review_count/buy_satisfy는 다나와 검색 결과
+# 페이지에 없는 필드라 None.
+def _danawa_item_to_candidate(item: danawa.DanawaSearchItem) -> dict:
+    return {
+        "product_code": f"danawa-{item['product_id']}",
+        "product_name": item["product_name"],
+        "price_krw": item["price_krw"],
+        "seller": "다나와",
+        "url": item["url"],
+        "review_count": None,
+        "buy_satisfy": None,
+        "image_url": item["image_url"],
+    }
 
 # 2026-08-26 - 8단계 중 실제 LLM을 부르는 refine/challenge/judge에
 # app.llm_cache(기존 AI 상세검색 facet 추출이 쓰던 것과 같은 Supabase KV+
@@ -440,6 +458,65 @@ class _FilterMergeNode(BaseAgent):
                     # 어절이 아니거나 검색 결과 자체에 없는 경우) 그대로 둔다.
                     brand_token = query.split()[0] if query.split() else ""
                     brand_matched = [it for it in candidates if brand_token and brand_token in it["product_name"]]
+                    if not brand_matched and brand_token:
+                        # 11번가 표본 30개 안에 브랜드 상품이 하나도 없다 -
+                        # "그 브랜드가 11번가에 진짜로 없는지" 아니면
+                        # "11번가 웹 랭킹 API가 준 표본에만 없는지"를 구분할
+                        # 방법이 지금까지 없었다(2026-08-28, 1000개 라이브
+                        # 벤치마크 재조사 - 92건 중 19건이 이 경우, 실제로는
+                        # 절반가량이 진짜 없는 것으로 추정되지만 나머지는
+                        # 검증 없이 그냥 넘어갔다). 다나와(보조 검증 소스,
+                        # HTML 스크래핑이라 실패해도 예외를 던지지 않는
+                        # 계약)에서 같은 브랜드 상품이 실제로 있는지 한 번
+                        # 확인한다 - 있으면 후보로 편입해 브랜드 우선순위
+                        # 재정렬의 재료로 쓰고, 없거나 조회 자체가 실패하면
+                        # (차단·타임아웃 등) 기존처럼 DeepSeek이 고른 후보
+                        # 그대로 진행한다 - 검색 자체를 막지 않는다는 원칙은
+                        # 그대로 유지된다.
+                        danawa_items = await danawa.search_danawa(query, limit=10)
+                        danawa_candidates = [
+                            it for it in (_danawa_item_to_candidate(x) for x in danawa_items) if brand_token in it["product_name"]
+                        ]
+                        # 브랜드 문자열 일치만으로는 부족하다(실측 -
+                        # "쁘레베베"가 유아용품 브랜드와 악기 케이스 브랜드에
+                        # 동시에 쓰여, "쁘레베베 아기띠 힙시트" 검색에
+                        # "쁘레베베 통기타 케이스"가 브랜드만 맞고 카테고리가
+                        # 완전히 다른 채 편입될 뻔했다). 그렇다고
+                        # _product_name_matches(구조적 유사도)를 그대로 걸면
+                        # 반대로 너무 엄격해서 진짜 정답도 걸러진다(실측 -
+                        # "콜러 비데 노브 전기식" vs "콜러 1292297-CP 화장실
+                        # 및 비데 크롬"처럼 자유 검색어와 상세 스펙 상품명
+                        # 사이의 표기 차이 때문에, 이미 사람이 봐도 맞는
+                        # 케이스가 구조적 필터로는 False가 나온다 - 이 함수는
+                        # 원래 "두 상품명이 같은 상품인지" 판정용으로 설계돼
+                        # 문자열이 서로 가까울 때만 정밀하다). filter_merge가
+                        # 통과율 낮을 때 쓰는 것과 같은 순서(구조 필터 ->
+                        # 낮으면 DeepSeek 의미 재검증)를 다나와 후보에도
+                        # 그대로 적용한다.
+                        danawa_structural = [
+                            it for it in danawa_candidates if price_table_module._product_name_matches(query, it["product_name"])
+                        ]
+                        if danawa_structural:
+                            danawa_brand_matched = danawa_structural
+                        elif danawa_candidates:
+                            danawa_relevant_indices = await deepseek.filter_relevant_indices(
+                                query, [it["product_name"] for it in danawa_candidates]
+                            )
+                            # DeepSeek도 수량/스펙까지는 안 본다(위 11번가
+                            # 경로와 같은 이유) - 여기서도 최종 방어선으로
+                            # model_or_quantity_conflict를 한 번 더 적용한다.
+                            danawa_brand_matched = [
+                                danawa_candidates[i]
+                                for i in (danawa_relevant_indices or [])
+                                if not price_table_module.model_or_quantity_conflict(
+                                    query, danawa_candidates[i]["product_name"]
+                                )
+                            ]
+                        else:
+                            danawa_brand_matched = []
+                        if danawa_brand_matched:
+                            candidates = danawa_brand_matched
+                            brand_matched = danawa_brand_matched
                     ranked = brand_matched or candidates
                 else:
                     # DeepSeek 호출 실패(None) 또는 "관련 상품이 하나도 없다"는

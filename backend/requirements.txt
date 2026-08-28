@@ -10,3 +10,4 @@ supabase==2.31.0
 google-adk==2.6.3
 litellm==1.96.0
 google-genai==2.16.0
+lxml==6.1.1
