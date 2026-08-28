@@ -132,7 +132,12 @@ const ProductThumbnail = ({
   const [errored, setErrored] = useState(false);
   // 2026-08-24 사용자 요청("사진 크기만 더 크게") - md 96px -> 128px,
   // sm 64px -> 96px.
-  const dim = size === 'sm' ? 'w-24 h-24' : 'w-32 h-32';
+  // 2026-08-28 사용자 요청("모바일만 사진을 아예 크게 키워서 채워봐") -
+  // size="md"는 현재 이 파일에서 메인 AI 추천 카드 하나만 쓰고 있어서(다른
+  // 후보 카드/스타일 가이드 카드는 전부 size="sm"), 여기서 모바일 전용으로
+  // 정사각형을 카드 폭 전체로 키워도 다른 카드에 영향이 없다. sm(640px)
+  // 이상에서는 기존 128px 정사각형으로 되돌아간다 - 데스크톱은 그대로.
+  const dim = size === 'sm' ? 'w-24 h-24' : 'w-full aspect-square sm:w-32 sm:h-32';
   const badgeDim = size === 'sm' ? 'w-6 h-6 text-xs' : 'w-7 h-7 text-sm';
   const iconDim = size === 'sm' ? 'w-5 h-5' : 'w-7 h-7';
 
