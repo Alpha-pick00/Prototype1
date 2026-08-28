@@ -86,9 +86,31 @@ const HomePage = () => {
   );
 };
 
+// 사이드바 padding-left만 반응하는 잎(leaf) 컴포넌트로 분리했다(2026-08-28,
+// 모바일 사이드바 토글 렉 리포트). 원래 AppShell이 직접 useSidebar()를 읽어
+// isOpen을 <Routes> 바로 위 래퍼에 넘겼는데, 그러면 isOpen이 바뀔 때마다
+// AppShell 자체가 리렌더되면서 그 아래 <Routes>(대화 중이면 Hero.tsx의 채팅
+// 스레드 전체 + framer-motion 애니메이션까지)가 통째로 다시 렌더링됐다 -
+// 데스크톱은 CPU 여유로 안 느껴지지만 모바일에서는 그대로 렉으로 드러남.
+// children을 prop으로 받아 컴포지션으로 분리하면, AppShell은 더 이상
+// useSidebar()를 구독하지 않으니 사이드바 토글에 전혀 반응하지 않고(children
+// 엘리먼트 참조도 그대로 유지돼 재사용됨), isOpen 변화는 이 작은 래퍼만
+// 리렌더시킨다.
+const SidebarPaddedContent = ({ children }: { children: React.ReactNode }) => {
+  const { isOpen } = useSidebar();
+  return (
+    <div
+      className={`transition-[padding-left] duration-300 ease-out ${
+        isOpen ? 'md:pl-[280px]' : 'md:pl-[68px]'
+      }`}
+    >
+      {children}
+    </div>
+  );
+};
+
 const AppShell = () => {
   const [loading, setLoading] = useState(true);
-  const { isOpen } = useSidebar();
 
   useEffect(() => {
     // Intro animation duration
@@ -117,17 +139,14 @@ const AppShell = () => {
           <Sidebar />
           {/* 사이드바 패널이 열려있으면 본문을 그만큼 오른쪽으로 밀어낸다(모달처럼 덮어서
               어둡게 가리는 대신, 옆에 도킹된 패널처럼) - 2026-08-12 요청. 두 값 다 리터럴
-              클래스 문자열로 써둬야 Tailwind가 빌드 시점에 인식해 CSS를 만들어낸다. */}
-          <div
-            className={`transition-[padding-left] duration-300 ease-out ${
-              isOpen ? 'md:pl-[280px]' : 'md:pl-[68px]'
-            }`}
-          >
+              클래스 문자열로 써둬야 Tailwind가 빌드 시점에 인식해 CSS를 만들어낸다.
+              isOpen 구독은 SidebarPaddedContent 안으로 옮겼다 - 위 주석 참고. */}
+          <SidebarPaddedContent>
             <Routes>
               <Route path="/" element={<HomePage />} />
               <Route path="/work" element={<Work />} />
             </Routes>
-          </div>
+          </SidebarPaddedContent>
         </div>
       )}
     </Router>
