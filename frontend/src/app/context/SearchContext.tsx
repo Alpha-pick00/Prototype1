@@ -52,6 +52,15 @@ export interface ChatTurn {
   // OR/AND를 정확히 구분한다(문자열만으로는 "브랜드 A 또는 B"를 표현할 수
   // 없다).
   facetAnswers: Record<string, string[]>;
+  // AI 상세검색에서 조건을 다 골라 확정한 턴은 사용자가 실제로 타이핑한 게
+  // 아니라 프론트가 조합한 검색어(예: "아이패드 에어 256GB 스타라이트")라,
+  // 그걸 새 사용자 메시지 말풍선으로 보여주면 마치 사용자가 그 문장을 직접
+  // 친 것처럼 보인다(2026-08-28 사용자 요청 - "조건을 다 선택하고 검색할 때
+  // 다시 쿼리를 입력해서 검색하는 것을... 쿼리를 보여지지 않게"). true면
+  // Hero.tsx가 이 턴의 사용자 말풍선을 그리지 않고 결과 카드만 보여준다 -
+  // 검색 자체는 평소와 똑같이 이 조합 검색어로 실행된다(백엔드 동작은
+  // 그대로, 화면에만 안 보일 뿐).
+  hideUserBubble?: boolean;
   status: TurnStatus;
   result: DecideResult | null;
   errorMessage: string;
@@ -133,13 +142,15 @@ const newTurn = (
   displayQuery: string,
   requestQuery: string,
   baseQuery?: string,
-  facetAnswers?: Record<string, string[]>
+  facetAnswers?: Record<string, string[]>,
+  hideUserBubble?: boolean
 ): ChatTurn => ({
   id: crypto.randomUUID(),
   displayQuery,
   requestQuery,
   baseQuery: baseQuery || requestQuery,
   facetAnswers: facetAnswers ?? {},
+  hideUserBubble,
   status: 'loading',
   result: null,
   errorMessage: '',
@@ -433,7 +444,7 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
       const existing = accumulatedFacetAnswers[label] ?? [];
       accumulatedFacetAnswers[label] = Array.from(new Set([...existing, ...values]));
     }
-    const turn = newTurn(combined, combined, origin.baseQuery, accumulatedFacetAnswers);
+    const turn = newTurn(combined, combined, origin.baseQuery, accumulatedFacetAnswers, true);
     appendTurn(conversation.id, turn);
     const personaOverride: Record<string, string> = {};
     for (const [label, values] of Object.entries(selected)) {

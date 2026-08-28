@@ -363,7 +363,7 @@ export const Hero = () => {
                 <div className="space-y-6">
                   {turns.map((turn) => (
                     <div key={turn.id} className="space-y-3">
-                      {editingTurnId === turn.id ? (
+                      {turn.hideUserBubble ? null : editingTurnId === turn.id ? (
                         <div className="flex flex-col items-end gap-2">
                           <textarea
                             autoFocus
