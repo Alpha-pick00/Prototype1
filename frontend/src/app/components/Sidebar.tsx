@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import { formatDistanceToNow } from 'date-fns';
 import { ko } from 'date-fns/locale';
 import { PanelLeft, X, Plus, Search, Trash2, LogOut, UserRound, Settings } from 'lucide-react';
@@ -312,12 +312,16 @@ export const Sidebar = () => {
   return (
     <>
       {/* 모바일 전용 플로팅 토글 — 작은 화면에서는 레일이 화면을 너무 많이 잡아먹으므로
-          md 이상에서만 레일을 보여주고, 그 아래에서는 이 버튼 하나로 대체한다. */}
+          md 이상에서만 레일을 보여주고, 그 아래에서는 이 버튼 하나로 대체한다.
+          backdrop-blur 제거(2026-08-28, 모바일 렉 리포트) - backdrop-filter는
+          매 프레임 뒤 배경을 다시 흐리게 계산해야 해서 모바일 GPU에 특히
+          부담이 크다. 반투명(bg-white/80) 대신 불투명(bg-white)으로 바꿔
+          블러 없이도 깔끔하게 보이게 했다. */}
       <button
         type="button"
         onClick={toggle}
         aria-label="기록 열기"
-        className={`md:hidden fixed top-4 left-4 z-[60] w-11 h-11 rounded-full border border-black/10 bg-white/80 backdrop-blur-md shadow-[0_4px_20px_rgba(0,0,0,0.06)] flex items-center justify-center text-neutral-700 hover:bg-white transition-all ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+        className={`md:hidden fixed top-4 left-4 z-[60] w-11 h-11 rounded-full border border-black/10 bg-white shadow-[0_4px_20px_rgba(0,0,0,0.06)] flex items-center justify-center text-neutral-700 hover:bg-neutral-50 transition-opacity ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
       >
         <PanelLeft className="w-5 h-5" strokeWidth={2} />
       </button>
@@ -338,20 +342,23 @@ export const Sidebar = () => {
         {isOpen ? panelBody : iconRail}
       </motion.aside>
 
-      {/* 모바일 — 레일이 따로 없으니 열렸을 때 화면 대부분을 덮는 패널 하나만 쓴다. */}
-      <AnimatePresence>
-        {isOpen && (
-          <motion.div
-            initial={{ x: '-100%' }}
-            animate={{ x: 0 }}
-            exit={{ x: '-100%' }}
-            transition={{ type: 'tween', duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-            className="md:hidden fixed inset-y-0 left-0 z-[65] w-[85vw] max-w-[300px] bg-white border-r border-black/10 flex flex-col shadow-[8px_0_30px_rgba(0,0,0,0.06)]"
-          >
-            {panelBody}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* 모바일 — 레일이 따로 없으니 열렸을 때 화면 대부분을 덮는 패널 하나만 쓴다.
+          항상 마운트해두고 x(transform)만 토글한다(2026-08-28, 모바일 렉 리포트) -
+          예전엔 isOpen && ... 조건부 마운트라 열 때마다 기록 목록(항목별 날짜
+          포맷팅 포함) DOM을 새로 만드는 작업이 슬라이드 애니메이션과 정확히 같은
+          순간에 겹쳤다. 항상 마운트해두면(닫혀 있을 때는 화면 밖으로 translateX
+          만 해둠) 여는 동작이 순수 transform 애니메이션 하나로 끝나 GPU 합성만
+          하면 되고, 매번 DOM을 새로 만드는 비용이 없다. aria-hidden으로 닫혀
+          있을 때 스크린리더/탭 포커스에서 제외한다. */}
+      <motion.div
+        initial={false}
+        animate={{ x: isOpen ? 0 : '-100%' }}
+        transition={{ type: 'tween', duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+        aria-hidden={!isOpen}
+        className="md:hidden fixed inset-y-0 left-0 z-[65] w-[85vw] max-w-[300px] bg-white border-r border-black/10 flex flex-col shadow-[8px_0_30px_rgba(0,0,0,0.06)]"
+      >
+        {panelBody}
+      </motion.div>
     </>
   );
 };
