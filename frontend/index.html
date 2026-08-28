@@ -4,7 +4,11 @@
     <head>
       
       <meta charset="UTF-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <!-- 모바일에서 채팅창(input) 터치 시 키보드가 뜨면서 화면이 확대되던 문제
+           방지(2026-08-28 사용자 요청) - iOS/Android는 포커스된 입력창의
+           글자 크기가 16px 미만이면 자동으로 화면을 확대한다. maximum-scale=1
+           + user-scalable=no로 확대 자체를 막아 화면을 고정한다. -->
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
       <title>αlpha Pick</title>
       <meta name="description" content="This web application offers an immersive user experience with a visually stunning interface, allowing users to easily navigate and submit forms seamlessly." />
       <meta name="robots" content="noindex, nofollow" />

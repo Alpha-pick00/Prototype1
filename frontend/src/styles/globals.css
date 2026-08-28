@@ -191,6 +191,18 @@ html {
   font-size: var(--font-size);
 }
 
+/* 모바일에서 화면이 좌우로 밀리는(가로 스크롤/오버스크롤) 현상 방지
+   (2026-08-28 사용자 요청 - "핸드폰만 화면을 좌우로 안움직이게 고정") -
+   Tailwind md 브레이크포인트(768px) 미만에서만 적용해 데스크톱 레이아웃은
+   그대로 둔다. */
+@media (max-width: 767px) {
+  html,
+  body {
+    overflow-x: hidden;
+    max-width: 100%;
+  }
+}
+
 /* About.tsx의 "Powered by" 로고 트랙(marquee-track) - 왼쪽으로 천천히 흐르는
    무한 스크롤. 목록을 두 번 이어붙여 렌더링하므로(poweredByClients 두 배)
    -50% 지점이 정확히 원본 목록 하나 분량이라, 거기서 처음 위치로 돌아가면

@@ -191,7 +191,11 @@ export const Hero = () => {
         disabled={isBusy}
         placeholder={hasConversation ? '무엇이든 더 물어보세요' : '무엇이든 구매하세요, 또는 상품 사진을 올려보세요'}
         autoComplete="off"
-        className="flex-1 bg-transparent text-base md:text-lg font-light text-neutral-800 placeholder:text-neutral-400 outline-none disabled:opacity-50"
+        /* min-w-0 없이 flex-1만 있으면 일부 모바일 브라우저가 input의
+           기본 최소너비를 content 기준으로 잡아 좁은 화면에서 전송
+           버튼과 겹쳐 보였다(2026-08-28 사용자 리포트) - min-w-0으로
+           flex 아이템이 형제(전송 버튼)를 절대 침범하지 않게 강제한다. */
+        className="flex-1 min-w-0 bg-transparent text-base md:text-lg font-light text-neutral-800 placeholder:text-neutral-400 outline-none disabled:opacity-50"
       />
       <button
         type="submit"
