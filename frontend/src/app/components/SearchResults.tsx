@@ -586,25 +586,32 @@ export const SearchResults = ({
           AI추천
         </button>
       </div>
+      {/* 모바일에서는 세로로 쌓는다(2026-08-28 사용자 요청 - "사진 밑에도
+          글자 들어가게 해도 돼, 지금 상품단위로 짤린 것 같다") - 좁은 화면에
+          [이미지 | 텍스트 | 가격]을 한 줄에 다 우겨넣으니(flex-1 fix 이후에도)
+          텍스트가 쓸 수 있는 폭 자체가 너무 좁아 여전히 답답해 보였다. sm
+          (640px) 미만에서는 이미지 위, 텍스트 아래, 가격 그 아래로 쌓아 각
+          영역이 카드 전체 너비를 쓰게 하고, sm 이상(태블릿/데스크톱)에서는
+          기존 가로 배치 그대로 되돌린다. */}
       <a
         href={displayed.url ?? undefined}
         target="_blank"
         rel="noopener noreferrer"
-        className="group flex items-start justify-between gap-4 mb-6"
+        className="group flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6"
       >
         {/* flex-1 없이 min-w-0만 있으면(2026-08-28 사용자 리포트: "글자가
             한글자씩 끊어져서 보임") 옆의 shrink-0 가격 칼럼에 밀려 이 그룹이
             거의 0px까지 눌린다 - min-w-0은 "0px까지 줄어들 수 있다"만
             허용할 뿐 "그만큼 줄어들어야 한다"는 아니라, flex-1로 남는
             공간을 정당하게 가져가게 해야 한다. */}
-        <div className="flex items-start gap-3 min-w-0 flex-1">
+        <div className="flex flex-col sm:flex-row sm:items-start gap-3 min-w-0 flex-1">
           <ProductThumbnail
             src={displayed.image_url}
             alt={displayed.product_name ?? ''}
             size="md"
             rank={displayed.url ? rankByUrl[displayed.url] : undefined}
           />
-          <div className="min-w-0">
+          <div className="min-w-0 w-full">
             <TopBadge url={displayed.url} />
             {/* break-keep(word-break: keep-all) 없이 컨테이너가 좁아지면
                 한글이 단어/음절 단위가 아니라 글자 하나마다 줄바꿈된다 -
@@ -614,7 +621,7 @@ export const SearchResults = ({
             <p className="mt-1.5 text-sm font-light text-neutral-600 leading-relaxed break-keep">{displayed.reasoning}</p>
           </div>
         </div>
-        <div className="shrink-0 flex items-center gap-2">
+        <div className="flex items-center justify-end gap-2 sm:shrink-0">
           <span className="text-xl font-medium text-neutral-950 whitespace-nowrap">
             {displayed.price || '가격 미확인'}
           </span>
