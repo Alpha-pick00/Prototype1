@@ -353,6 +353,72 @@ def test_run_does_not_call_refine_query_when_skip_gate_already_matched_original(
     assert result.decision.product_name == "탄산음료 500ml 병"
 
 
+def test_run_rescues_relevance_with_deepseek_when_structural_filter_skips(monkeypatch):
+    """2026-08-28, 100개 라이브 벤치마크로 실측 발견한 회귀 - 구조적 관련성
+    필터(_product_name_matches)가 표기 차이(예: "루미큐브" vs "럼미 큐브")
+    때문에 통과율이 임계값 미만으로 나오면, filter_merge는 "이 질의엔 필터가
+    안 맞는다"고 보고 필터 자체를 건너뛰고 원본 표본을 무방비로 그대로 썼다
+    - challenge/judge가 스킵된 raw 모드에서 검색 API가 준 원본 1위(완전히
+    무관한 상품)가 검증 없이 그대로 최종 추천이 됐다. 이제 그 좁은 경우에만
+    DeepSeek에게 "실제로 관련 있는 것만 골라달라"고 물어 의미로 재필터링한다."""
+
+    items = [
+        _item("완전히 무관한 다른 상품", 5000, code="1"),  # 원본 1위, 검색어와 무관
+        _item("럼미 우든 큐브 게임 세트", 30000, code="2"),  # 관련 상품(표기 차이로 구조적 필터를 못 통과)
+        _item("또 다른 무관한 상품", 8000, code="3"),
+    ]
+
+    async def _search(query, limit):
+        return items
+
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _search)
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
+    async def _fake_filter_relevant_indices(query, product_names):
+        # DeepSeek이 의미로 재필터링 - 인덱스 1(럼미 우든 큐브 게임 세트)만 관련 있다고 판정.
+        return [1]
+
+    monkeypatch.setattr(adk_pipeline.deepseek, "filter_relevant_indices", _fake_filter_relevant_indices)
+
+    result = asyncio.run(adk_pipeline.run("루미큐브 보드게임 가족용"))
+
+    # _product_name_matches만 썼다면 통과율이 낮아 필터를 건너뛰고 원본 1위
+    # ("완전히 무관한 다른 상품")가 그대로 최종 추천이 됐을 것이다. DeepSeek
+    # 재필터링이 개입해 실제로 관련 있는 상품만 남아야 한다.
+    assert result.decision.product_name == "럼미 우든 큐브 게임 세트"
+
+
+def test_run_falls_back_to_original_when_deepseek_relevance_rescue_finds_none(monkeypatch):
+    """DeepSeek 재필터링이 호출됐지만 실패(None)하거나 "관련 상품이 하나도
+    없다"([])는 확정 판정을 내리면, 검색 자체를 막지 않고 기존처럼 원본
+    표본을 그대로 쓴다 - 검증 기회를 한 번 더 준 뒤의 최종 안전망이다."""
+
+    items = [_item("아무 상품", 5000, code="1")]
+
+    async def _search(query, limit):
+        return items
+
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _search)
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
+    async def _fake_filter_relevant_indices(query, product_names):
+        return None  # 호출 실패로 가정
+
+    monkeypatch.setattr(adk_pipeline.deepseek, "filter_relevant_indices", _fake_filter_relevant_indices)
+
+    result = asyncio.run(adk_pipeline.run("전혀 안 맞는 검색어"))
+
+    assert result.decision.product_name == "아무 상품"
+
+
 # ---------------------------------------------------------------------------
 # refine/challenge/judge 캐시 콜백(2026-08-26) - llm_cache.exact_get/set을
 # 인메모리 dict로 몽키패치해 실제 Supabase 없이 콜백 로직만 검증한다.

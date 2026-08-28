@@ -487,3 +487,77 @@ async def check_grade_mismatch(query: str, product_names: list[str]) -> GradeMis
         return GradeMismatchResult(excluded_grade_tokens=tokens, suggested_keyword=keyword)
     except Exception:
         return _NO_GRADE_MISMATCH
+
+
+# raw 모드 filter_merge의 관련성 필터(_product_name_matches, rapidfuzz 기반
+# 문자열 유사도)가 표기 차이(외래어 표기 등, 예: "루미큐브" vs "럼미 큐브")를
+# 못 잡아 통과율이 낮게 나오면, filter_merge는 "이 질의엔 필터가 안 맞는
+# 카테고리성 검색어"로 오판해 필터 자체를 건너뛰고 원본 1위를 무방비로
+# 채택했다(2026-08-28, 100개 라이브 벤치마크로 실측 - "루미큐브 보드게임"
+# 검색에 완전히 다른 게임 "펭귄 얼음깨기"가, "고양이 자동장난감 낚시대"
+# 검색에 "테일 볼 장난감"이 최종 추천으로 뜸). challenge를 통째로 되살리는
+# 대신, 정확히 이 좁은 경우(구조적 필터가 스스로 "판단 불가"로 물러난
+# 경우)에만 DeepSeek에게 "이 표본 중 실제로 검색어와 관련 있는 것만 골라라"를
+# 1회 물어 의미 기반으로 재필터링한다 - 평소(필터 통과율이 충분한 대다수
+# 질의)에는 이 함수 자체가 안 불려 raw 모드의 속도/비용 이점을 그대로
+# 유지한다.
+RELEVANT_INDICES_CHECK_INSTRUCTIONS = (
+    "당신은 쇼핑 검색어와 검색 결과 상품명 목록을 비교해, 목록 중 검색어가 "
+    "실제로 찾는 상품과 같은 종류(모델/브랜드가 다르더라도 같은 제품군이면 "
+    "포함, 완전히 다른 카테고리의 상품은 제외)인 것들의 번호만 골라내는 "
+    "에이전트입니다. 상품명 표기가 검색어와 다르더라도(예: 외래어 표기 차이, "
+    "붙여쓰기/띄어쓰기, 영문/한글 혼용) 같은 상품이면 포함하세요 - 문자열이 "
+    "얼마나 비슷한지가 아니라 실제로 같은 종류의 상품인지로 판단하세요.\n\n"
+    "본품 vs 부속품/소모품 구분에 특히 주의하세요 - 검색어가 기기·본품을 "
+    "가리키면(예: '커피머신', '무선청소기', '보드게임') 그 기기에 쓰는 "
+    "캡슐/필터/케이스/충전기/리필 등 소모품·부속품 상품은 검색어와 이름이 "
+    "겹치더라도 제외하세요(예: '네스프레소 커피머신' 검색에 '네스프레소 "
+    "캡슐 60개'는 본품이 아니라 소모품이므로 제외). 반대로 검색어 자체가 "
+    "소모품/부속품을 가리키면(예: '커피 캡슐', '청소기 필터') 그 종류의 "
+    "상품을 포함하세요.\n\n"
+    "단일 상품 vs 다른 상품이 섞인 번들/세트에도 주의하세요 - 검색어가 "
+    "특정 단일 품목을 가리키는데(예: '신라면 5개입'), 상품명에 그 품목과 "
+    "함께 서로 다른 종류의 다른 상품이 나열돼 있으면(예: '신라면+안성탕면+"
+    "짜파게티 세트') 검색어가 찾는 품목이 일부 포함돼 있어도 제외하세요 - "
+    "사용자는 그 품목만 원했을 가능성이 높습니다. 같은 품목을 여러 개/여러 "
+    "묶음으로 파는 것(예: '신라면 5개입 8팩', '신라면 120g x 10개')은 다른 "
+    "상품이 섞인 게 아니므로 포함하세요.\n\n"
+    "관련 있는 상품이 하나도 없으면 빈 배열을 반환하세요. 반드시 아래 JSON "
+    "형식으로만 답하세요(번호는 0부터 시작하는 인덱스). 다른 텍스트나 "
+    "코드펜스를 덧붙이지 마세요.\n\n"
+    '{"relevant_indices": [0, 2, 5]}'
+)
+
+_MAX_RELEVANT_CHECK_ITEMS = 30
+
+
+def build_relevant_indices_prompt(query: str, product_names: list[str]) -> str:
+    lines = "\n".join(f"{i}. {name}" for i, name in enumerate(product_names))
+    return f"{RELEVANT_INDICES_CHECK_INSTRUCTIONS}\n\n검색어: {query}\n\n상품 목록:\n{lines}"
+
+
+async def filter_relevant_indices(query: str, product_names: list[str]) -> list[int] | None:
+    """product_names 중 검색어와 실제로 관련 있는 항목의 인덱스 목록을
+    돌려준다. 실패(키 없음·API 오류·JSON 파싱 실패)하면 None - 호출부가
+    "판정 불가"로 보고 기존 폴백(원본 그대로 통과)을 그대로 쓴다. 빈
+    리스트([])와 None은 의미가 다르다 - 빈 리스트는 "다 확인했는데 관련
+    상품이 하나도 없다"는 확정 판정이고, None은 "판정 자체를 못 했다"다."""
+    if not product_names or not settings.deepseek_api_key:
+        return None
+    capped = product_names[:_MAX_RELEVANT_CHECK_ITEMS]
+    try:
+        client = _client()
+        prompt = build_relevant_indices_prompt(query, capped)
+        response = await client.chat.completions.create(
+            model=settings.deepseek_model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+        data = parse_json_object(response.choices[0].message.content or "")
+        raw_indices = data.get("relevant_indices")
+        if not isinstance(raw_indices, list):
+            return None
+        return sorted({i for i in raw_indices if isinstance(i, int) and 0 <= i < len(capped)})
+    except Exception:
+        return None

@@ -68,7 +68,7 @@ from fetchers import elevenst
 
 from . import llm_cache
 from . import price_table as price_table_module
-from .agents import gpt
+from .agents import deepseek, gpt
 from .agents.base import build_recommend_prompt, build_refine_query_prompt, parse_json_object
 from .config import settings
 from .debate import (
@@ -387,7 +387,33 @@ class _FilterMergeNode(BaseAgent):
         else:
             relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
             match_ratio = len(relevant) / len(items)
-            ranked = items if match_ratio < _CATEGORY_QUERY_MIN_MATCH_RATIO else relevant
+            if match_ratio >= _CATEGORY_QUERY_MIN_MATCH_RATIO:
+                ranked = relevant
+            else:
+                # 구조적 필터(rapidfuzz 문자열 유사도) 통과율이 낮으면 예전엔
+                # "이 질의엔 필터가 안 맞는다"고 보고 무방비로 원본을 그대로
+                # 썼는데(2026-08-27), 100개 라이브 벤치마크로 실측 확인
+                # (2026-08-28) - "루미큐브"(vs 표기 "럼미 큐브") 같은 외래어
+                # 표기 차이 때문에 실제로는 관련 상품이 표본에 있는데도 문자열
+                # 유사도가 낮게 나와 필터가 스킵되고, 검색 API가 준 원본 1위
+                # (완전히 무관한 상품, 예: 보드게임 검색에 "펭귄 얼음깨기")가
+                # 그대로 최종 추천으로 채택되는 회귀가 있었다. "여러 후보 중
+                # 뭐가 나은지 판단"이 아니라 "구조적 필터가 스스로 판단을
+                # 포기한 좁은 경우에 한해 의미로 다시 걸러내는" 것이라 raw
+                # 모드 취지(판단 없이 그대로)와 어긋나지 않는다 - 평소(통과율
+                # 충분)에는 이 경로 자체를 안 타 속도/비용에 영향이 없다.
+                relevant_indices = await deepseek.filter_relevant_indices(
+                    query, [it["product_name"] for it in items]
+                )
+                if relevant_indices:
+                    ranked = [items[i] for i in relevant_indices]
+                else:
+                    # DeepSeek 호출 실패(None) 또는 "관련 상품이 하나도 없다"는
+                    # 확정 판정([])이면 기존처럼 원본 그대로 - 검색 자체를
+                    # 막을 이유는 없다(judge가 스킵돼 1위가 그대로 채택되는
+                    # 건 여전하지만, 최소한 완전히 무관한 상품을 의미로 한 번
+                    # 걸러낼 기회는 준 뒤의 최종 폴백이다).
+                    ranked = items
 
         price_min = state.get("price_min")
         price_max = state.get("price_max")
