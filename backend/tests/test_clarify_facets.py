@@ -1023,6 +1023,35 @@ def test_check_clarify_facets_orders_phone_model_facet_first(monkeypatch):
     assert result.options.facets[0].label == "핸드폰 기종"
 
 
+def test_check_clarify_facets_orders_brand_before_model_facet_for_non_accessory_query(monkeypatch):
+    """사용자 리포트(2026-08-28, "HITL 할 때 브랜드 먼저 선택했을 때 해당
+    브랜드의 모델만 선택할 수 있는 구조로") - 본품을 찾는 질의("이어폰")에서는
+    "기종"(실제로는 세부 모델명)이 "브랜드"보다 먼저 오면 안 된다. 액세서리
+    질의(위 test_check_clarify_facets_orders_phone_model_facet_first)와
+    달리, 질의 자체가 액세서리를 가리키지 않을 때는 브랜드가 먼저 와야
+    "브랜드를 고르면 그 브랜드의 모델만" 순서로 좁혀나갈 수 있다."""
+
+    async def _fake_search(query, limit=3):
+        return [
+            {"pcode": "1", "product_name": "삼성전자 갤럭시버즈 무선이어폰", "total_mall_count": None},
+            {"pcode": "2", "product_name": "애플 에어팟 무선이어폰", "total_mall_count": None},
+        ]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst_web_ranking", _fake_search)
+
+    async def _fake_extract_facets(query, names, required_labels=None):
+        return [
+            ClarifyFacet(label="기종", options=["갤럭시버즈", "에어팟"]),
+            ClarifyFacet(label="브랜드", options=["삼성전자", "애플"]),
+        ]
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
+
+    result = asyncio.run(check_clarify_facets("이어폰"))
+
+    assert result.options.facets[0].label == "브랜드"
+
+
 # -- "카테고리" facet은 절대 되묻지 않는다(2026-08-20, "제품분류가 굳이
 # 필요해?") ------------------------------------------------------------------
 

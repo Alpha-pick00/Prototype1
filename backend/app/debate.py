@@ -902,21 +902,28 @@ def _attach_facet_crossfilter(facets: list[ClarifyFacet], names: list[str]) -> l
 # 계산해두므로, 이건 어떤 순서로 "물어보면" 자연스러운지에 대한 화면 표시
 # 순서일 뿐이다.
 _FACET_ORDER_HINTS = [
-    # "기종"(핸드폰 기종/호환기종)이 맨 앞 - 사용자 요청(2026-08-14: "검색
-    # 순서에서 핸드폰 기종이 가장 먼저 위로 올라가야할 것 같은데"). 액세서리
-    # 검색에서는 "내 기기에 맞는지"가 카테고리·브랜드보다 더 먼저 정해야 하는
-    # 기준이라는 판단.
-    "기종",
-    "카테고리", "브랜드", "제조사", "시리즈", "모델", "타입", "종류",
+    "카테고리", "브랜드", "제조사", "기종",
+    "시리즈", "모델", "타입", "종류",
     "용량", "무게", "사이즈", "용기형태", "구매유형", "특징", "색상",
 ]
 
+# 질의 자체가 액세서리를 찾을 때만(예: "아이폰 케이스") "기종"을 최우선으로
+# 쓴다(2026-08-14, "핸드폰 케이스 같은 액세서리 검색에서는 내 기기에 맞는지가
+# 브랜드보다 먼저 정해야 하는 기준"). 본품 검색(예: "이어폰")에서는 이 힌트를
+# 안 쓴다 - 2026-08-28 사용자 리포트("HITL 할 때 브랜드 먼저 선택했을 때 해당
+# 브랜드의 모델만 선택할 수 있는 구조로") 실측 확인: 본품 검색에서는 "기종"
+# 축의 옵션이 실제로는 세부 모델명(예: "갤럭시"/"노트"/"아이폰")이라 "브랜드"
+# 보다 더 미시적인데도 무조건 최우선으로 고정돼 있어, 아직 브랜드도 안
+# 골랐는데 모델부터 골라야 하는 부자연스러운 순서가 됐다.
+_ACCESSORY_QUERY_FACET_ORDER_HINTS = ["기종", *_FACET_ORDER_HINTS]
 
-def _facet_display_order(facet: ClarifyFacet) -> int:
-    for i, hint in enumerate(_FACET_ORDER_HINTS):
+
+def _facet_display_order(facet: ClarifyFacet, query: str) -> int:
+    hints = _ACCESSORY_QUERY_FACET_ORDER_HINTS if price_table_module._looks_like_accessory(query) else _FACET_ORDER_HINTS
+    for i, hint in enumerate(hints):
         if hint in facet.label:
             return i
-    return len(_FACET_ORDER_HINTS)
+    return len(hints)
 
 
 def _facet_centrality(facet: ClarifyFacet, incidence: dict[str, set[int]]) -> float:
@@ -930,13 +937,16 @@ def _facet_centrality(facet: ClarifyFacet, incidence: dict[str, set[int]]) -> fl
     return sum(len(incidence.get(_normalize_for_match(o), set())) for o in facet.options) / len(facet.options)
 
 
-def _facet_sort_key(facet: ClarifyFacet, incidence: dict[str, set[int]]) -> tuple[int, float]:
+def _facet_sort_key(facet: ClarifyFacet, incidence: dict[str, set[int]], query: str) -> tuple[int, float]:
     """_facet_display_order(힌트 기반)가 우선이고, 힌트가 못 잡은 facet들
     사이에서만 incidence 중심성(내림차순)으로 다시 가른다 - 힌트가 이미
     잡은 facet은 중심성을 아예 안 보므로(표본이 작을 때 중심성 신호가
     약해지는 문제로부터 안전) 기존 정렬 결과가 그대로 보존된다."""
-    order = _facet_display_order(facet)
-    if order != len(_FACET_ORDER_HINTS):
+    order = _facet_display_order(facet, query)
+    hints_len = len(_ACCESSORY_QUERY_FACET_ORDER_HINTS) if price_table_module._looks_like_accessory(query) else len(
+        _FACET_ORDER_HINTS
+    )
+    if order != hints_len:
         return (order, 0.0)
     return (order, -_facet_centrality(facet, incidence))
 
@@ -1023,7 +1033,7 @@ async def _extract_facets(
         facets = await _enrich_device_models_by_ecosystem(facets, names, query)
         facets = _attach_facet_crossfilter(facets, names)
         incidence = _build_facet_value_incidence(facets, names)
-        facets = sorted(facets, key=lambda f: _facet_sort_key(f, incidence))
+        facets = sorted(facets, key=lambda f: _facet_sort_key(f, incidence, query))
         payload = {"facets": [f.model_dump() for f in facets]}
         await llm_cache.exact_set(_FACET_CACHE_NAMESPACE, query, payload)
         await llm_cache.semantic_set(_FACET_CACHE_NAMESPACE, query, payload)

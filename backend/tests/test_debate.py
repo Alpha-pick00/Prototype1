@@ -553,8 +553,8 @@ def test_facet_sort_key_ignores_centrality_for_hint_matched_facet():
     high_degree = _facet("브랜드", ["삼성전자"])
     low_degree = _facet("브랜드", ["LG전자"])
 
-    assert _facet_sort_key(high_degree, incidence) == _facet_sort_key(low_degree, incidence)
-    assert _facet_sort_key(high_degree, incidence)[1] == 0.0
+    assert _facet_sort_key(high_degree, incidence, "삼성전자") == _facet_sort_key(low_degree, incidence, "삼성전자")
+    assert _facet_sort_key(high_degree, incidence, "삼성전자")[1] == 0.0
 
 
 def test_facet_sort_key_orders_hint_unmatched_facets_by_descending_centrality():
@@ -564,8 +564,8 @@ def test_facet_sort_key_orders_hint_unmatched_facets_by_descending_centrality():
     broad = _facet("아무거나축", ["넓은값"])
     narrow = _facet("다른아무거나축", ["좁은값"])
 
-    broad_key = _facet_sort_key(broad, incidence)
-    narrow_key = _facet_sort_key(narrow, incidence)
+    broad_key = _facet_sort_key(broad, incidence, "아무 검색어")
+    narrow_key = _facet_sort_key(narrow, incidence, "아무 검색어")
 
     assert broad_key[0] == narrow_key[0] == len(_FACET_ORDER_HINTS)
     assert broad_key < narrow_key  # 중심성이 높을수록(더 넓은 축일수록) 먼저 온다
