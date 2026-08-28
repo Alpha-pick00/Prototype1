@@ -422,7 +422,25 @@ class _FilterMergeNode(BaseAgent):
                         for i in relevant_indices
                         if not price_table_module.model_or_quantity_conflict(query, items[i]["product_name"])
                     ]
-                    ranked = spec_checked or [items[i] for i in relevant_indices]
+                    candidates = spec_checked or [items[i] for i in relevant_indices]
+                    # DeepSeek은 "같은 제품군인지"만 보고 브랜드 일치까지는
+                    # 강제하지 않는다(예: "콜러 비데" 검색에 콜러 상품과
+                    # 무관 브랜드 상품을 둘 다 관련 있다고 반환) - judge가
+                    # 스킵된 raw 모드는 이 목록에서 검색 API 원본 순위 1위를
+                    # 그대로 채택하므로, 브랜드가 안 맞는 후보가 앞서 있으면
+                    # 그게 그대로 최종 추천이 된다(2026-08-28, 1000개 라이브
+                    # 벤치마크 재조사로 실측 - 진짜 오매칭 92건 중 37건이 이
+                    # 패턴). 이미 DeepSeek이 관련성을 확정한 좁은 후보군
+                    # 안에서, 질의 첫 어절(대개 브랜드/제조사명)이 상품명에
+                    # 그대로 등장하는 후보가 하나라도 있으면 그것만 남긴다 -
+                    # 새로운 후보를 걸러내는 게 아니라 이미 검증된 후보들
+                    # 사이의 우선순위 재정렬이라, 순수 문자열 규칙을 전체
+                    # 검색 결과에 바로 적용할 때 발생하는 오탐(4.5%, 실측)
+                    # 위험이 크게 줄어든다. 하나도 없으면(브랜드가 첫
+                    # 어절이 아니거나 검색 결과 자체에 없는 경우) 그대로 둔다.
+                    brand_token = query.split()[0] if query.split() else ""
+                    brand_matched = [it for it in candidates if brand_token and brand_token in it["product_name"]]
+                    ranked = brand_matched or candidates
                 else:
                     # DeepSeek 호출 실패(None) 또는 "관련 상품이 하나도 없다"는
                     # 확정 판정([])이면 기존처럼 원본 그대로 - 검색 자체를

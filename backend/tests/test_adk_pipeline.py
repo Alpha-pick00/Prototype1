@@ -458,6 +458,69 @@ def test_run_keeps_deepseek_relevance_rescue_when_all_candidates_have_quantity_c
     assert result.decision.product_name == "메로나 메론 30개입 아이스크림"
 
 
+def test_run_prefers_deepseek_relevance_rescue_candidate_matching_query_brand(monkeypatch):
+    """2026-08-28, 1000개 라이브 벤치마크 재조사로 실측 발견한 회귀 - DeepSeek
+    재필터링은 "같은 제품군인지"만 볼 뿐 브랜드 일치까지는 강제하지 않는다
+    (예: "콜러 비데" 검색에 콜러 상품과 무관 브랜드 상품을 둘 다 관련
+    있다고 반환). judge가 스킵된 raw 모드는 이 목록에서 검색 API 원본 순위
+    1위를 그대로 채택하므로, 브랜드가 안 맞는 후보가 앞서 있으면 그게 그대로
+    최종 추천이 됐다. 이미 DeepSeek이 관련성을 확정한 후보군 안에서 질의
+    첫 어절(브랜드)이 상품명에 그대로 등장하는 후보가 있으면 그것만 남긴다."""
+
+    items = [
+        _item("뉴 패밀리 비데 전자식비데 상부조립", 200000, code="1"),  # 원본 1위, 브랜드 불일치
+        _item("콜러 퓨어워시 비데 변기 시트", 350000, code="2"),  # 검색어 브랜드와 일치하는 진짜 정답
+    ]
+
+    async def _search(query, limit):
+        return items
+
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _search)
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
+    async def _fake_filter_relevant_indices(query, product_names):
+        # DeepSeek이 "둘 다 비데니까 관련 있다"고(브랜드 무관하게) 판정.
+        return [0, 1]
+
+    monkeypatch.setattr(adk_pipeline.deepseek, "filter_relevant_indices", _fake_filter_relevant_indices)
+
+    result = asyncio.run(adk_pipeline.run("콜러 비데 노브 전기식"))
+
+    assert result.decision.product_name == "콜러 퓨어워시 비데 변기 시트"
+
+
+def test_run_keeps_all_deepseek_relevance_rescue_candidates_when_none_match_query_brand(monkeypatch):
+    """DeepSeek이 골라준 후보 중 질의 첫 어절과 일치하는 게 하나도 없으면
+    (검색 API 표본에 애초에 그 브랜드가 없던 경우, 또는 질의 첫 어절이
+    브랜드가 아닌 경우) 브랜드 우선순위 필터를 적용하지 않고 DeepSeek 판정을
+    그대로 쓴다 - 관련 상품 자체가 있는데 엉뚱하게 다 걸러지면 안 된다."""
+
+    items = [_item("아무 브랜드 비데 상품", 200000, code="1")]
+
+    async def _search(query, limit):
+        return items
+
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _search)
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
+    async def _fake_filter_relevant_indices(query, product_names):
+        return [0]
+
+    monkeypatch.setattr(adk_pipeline.deepseek, "filter_relevant_indices", _fake_filter_relevant_indices)
+
+    result = asyncio.run(adk_pipeline.run("콜러 비데 노브 전기식"))
+
+    assert result.decision.product_name == "아무 브랜드 비데 상품"
+
+
 def test_run_falls_back_to_original_when_deepseek_relevance_rescue_finds_none(monkeypatch):
     """DeepSeek 재필터링이 호출됐지만 실패(None)하거나 "관련 상품이 하나도
     없다"([])는 확정 판정을 내리면, 검색 자체를 막지 않고 기존처럼 원본
