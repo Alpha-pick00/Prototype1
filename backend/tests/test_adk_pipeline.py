@@ -392,6 +392,72 @@ def test_run_rescues_relevance_with_deepseek_when_structural_filter_skips(monkey
     assert result.decision.product_name == "럼미 우든 큐브 게임 세트"
 
 
+def test_run_rejects_deepseek_relevance_rescue_candidate_with_quantity_conflict(monkeypatch):
+    """2026-08-28, 1000개 라이브 벤치마크 재조사로 실측 발견한 회귀 - DeepSeek
+    재필터링 프롬프트는 "같은 품목의 다른 묶음"(예: "신라면 5개입 8팩")은
+    포함하라고 지시하는데, 이 관대함이 "메로나 20개입" 검색에 "메로나
+    30개입"이 통과되는 등 검색어에 명시된 정확한 수량과 다른 후보까지
+    새어나가게 했다(judge가 스킵된 raw 모드라 그중 원본 1위가 검증 없이
+    그대로 최종 추천이 됨). DeepSeek이 골라준 인덱스에도
+    model_or_quantity_conflict(결정적 규칙, LLM 편차 없음)를 한 번 더 적용해
+    수량이 명시적으로 다른 후보는 최종적으로 제외한다."""
+
+    items = [
+        _item("메로나 메론 30개입 아이스크림", 15000, code="1"),  # 원본 1위, 수량 충돌
+        _item("메로나 메론 20개입 아이스크림", 12000, code="2"),  # 검색어와 수량이 일치하는 진짜 정답
+    ]
+
+    async def _search(query, limit):
+        return items
+
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _search)
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
+    async def _fake_filter_relevant_indices(query, product_names):
+        # DeepSeek이 "같은 품목의 다른 묶음"이라며 둘 다 관련 있다고(관대하게) 판정.
+        return [0, 1]
+
+    monkeypatch.setattr(adk_pipeline.deepseek, "filter_relevant_indices", _fake_filter_relevant_indices)
+
+    result = asyncio.run(adk_pipeline.run("메로나 20개입"))
+
+    # 수량 충돌 후보(30개입)는 제외되고, 정확한 수량(20개입)만 남아야 한다.
+    assert result.decision.product_name == "메로나 메론 20개입 아이스크림"
+
+
+def test_run_keeps_deepseek_relevance_rescue_when_all_candidates_have_quantity_conflict(monkeypatch):
+    """수량 체크 이후 후보가 전부 걸러지면(검색 API 표본에 애초에 정확한
+    수량 상품이 하나도 없던 경우) DeepSeek 판정 자체를 무시하지 않고 그대로
+    쓴다 - "검증 기회를 한 번 더 준 뒤에도 후보가 아예 없으면 검색 자체를
+    막지 않는다"는 기존 폴백 원칙과 동일하게, 수량 불일치 후보라도 관련
+    상품 자체가 없는 것보다는 낫다."""
+
+    items = [_item("메로나 메론 30개입 아이스크림", 15000, code="1")]
+
+    async def _search(query, limit):
+        return items
+
+    monkeypatch.setattr(adk_pipeline.elevenst, "search_elevenst_web_ranking", _search)
+
+    async def _no_notes(query, candidates):
+        return {}
+
+    monkeypatch.setattr(adk_pipeline.gpt, "candidate_notes", _no_notes)
+
+    async def _fake_filter_relevant_indices(query, product_names):
+        return [0]
+
+    monkeypatch.setattr(adk_pipeline.deepseek, "filter_relevant_indices", _fake_filter_relevant_indices)
+
+    result = asyncio.run(adk_pipeline.run("메로나 20개입"))
+
+    assert result.decision.product_name == "메로나 메론 30개입 아이스크림"
+
+
 def test_run_falls_back_to_original_when_deepseek_relevance_rescue_finds_none(monkeypatch):
     """DeepSeek 재필터링이 호출됐지만 실패(None)하거나 "관련 상품이 하나도
     없다"([])는 확정 판정을 내리면, 검색 자체를 막지 않고 기존처럼 원본

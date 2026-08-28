@@ -406,7 +406,23 @@ class _FilterMergeNode(BaseAgent):
                     query, [it["product_name"] for it in items]
                 )
                 if relevant_indices:
-                    ranked = [items[i] for i in relevant_indices]
+                    # DeepSeek 재필터링은 "같은 종류의 상품인지"를 의미로 판단할
+                    # 뿐, 검색어에 명시된 정확한 수량/용량까지는 안 본다(의도적 -
+                    # "신라면 5개입 8팩"처럼 같은 품목의 다른 묶음은 포함하라고
+                    # 프롬프트가 지시한다). 그 결과 "메로나 20개입" 검색에
+                    # "메로나 30개입"이 통과되는 등, 수량이 명시적으로 다른
+                    # 후보가 그대로 새어나갈 수 있다(2026-08-28, 1000개 라이브
+                    # 벤치마크 재조사로 실측 - 진짜 오매칭 92건 중 21건이 이
+                    # 패턴). model_or_quantity_conflict는 결정적 규칙(LLM
+                    # 편차 없음)이라 여기서 한 번 더 걸러 안전망을 좁힌다 -
+                    # 전부 걸리면(수량 표기가 전혀 다른 표본만 있던 경우)
+                    # DeepSeek 판정을 무시하지 않고 그대로 둔다.
+                    spec_checked = [
+                        items[i]
+                        for i in relevant_indices
+                        if not price_table_module.model_or_quantity_conflict(query, items[i]["product_name"])
+                    ]
+                    ranked = spec_checked or [items[i] for i in relevant_indices]
                 else:
                     # DeepSeek 호출 실패(None) 또는 "관련 상품이 하나도 없다"는
                     # 확정 판정([])이면 기존처럼 원본 그대로 - 검색 자체를
