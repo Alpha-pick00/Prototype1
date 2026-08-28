@@ -201,6 +201,15 @@ html {
     overflow-x: hidden;
     max-width: 100%;
   }
+
+  /* 모바일에서 전체적으로 글자가 커 보인다는 요청(2026-08-28) - 거의 모든
+     Tailwind 텍스트/간격 유틸리티가 rem(=이 --font-size 기준) 단위라, 이
+     값 하나만 바꾸면 개별 text-* 클래스를 일일이 건드리지 않고도 화면 전체
+     글자 크기가 비율대로 함께 줄어든다(16px 기준 -1px ≈ 6% 축소). :root에서
+     재정의해야 html의 font-size: var(--font-size) 선언이 이 값을 읽는다. */
+  :root {
+    --font-size: 15px;
+  }
 }
 
 /* About.tsx의 "Powered by" 로고 트랙(marquee-track) - 왼쪽으로 천천히 흐르는

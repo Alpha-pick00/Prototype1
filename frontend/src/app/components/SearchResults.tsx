@@ -557,14 +557,14 @@ export const SearchResults = ({
     if (!url) return null;
     if (url === decision.url) {
       return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-neutral-950 text-white">
+        <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded-full text-[10px] font-medium bg-neutral-950 text-white">
           AI 1위 추천
         </span>
       );
     }
     if (url === mostSatisfiedUrl) {
       return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#4ADE80]/15 text-[#166534]">
+        <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#4ADE80]/15 text-[#166534]">
           만족도 최고
         </span>
       );
@@ -592,7 +592,12 @@ export const SearchResults = ({
         rel="noopener noreferrer"
         className="group flex items-start justify-between gap-4 mb-6"
       >
-        <div className="flex items-start gap-3 min-w-0">
+        {/* flex-1 없이 min-w-0만 있으면(2026-08-28 사용자 리포트: "글자가
+            한글자씩 끊어져서 보임") 옆의 shrink-0 가격 칼럼에 밀려 이 그룹이
+            거의 0px까지 눌린다 - min-w-0은 "0px까지 줄어들 수 있다"만
+            허용할 뿐 "그만큼 줄어들어야 한다"는 아니라, flex-1로 남는
+            공간을 정당하게 가져가게 해야 한다. */}
+        <div className="flex items-start gap-3 min-w-0 flex-1">
           <ProductThumbnail
             src={displayed.image_url}
             alt={displayed.product_name ?? ''}
@@ -601,8 +606,11 @@ export const SearchResults = ({
           />
           <div className="min-w-0">
             <TopBadge url={displayed.url} />
-            <p className="mt-1 text-lg font-medium text-neutral-950">{displayed.product_name}</p>
-            <p className="text-sm font-light text-neutral-500">{displayed.retailer}</p>
+            {/* break-keep(word-break: keep-all) 없이 컨테이너가 좁아지면
+                한글이 단어/음절 단위가 아니라 글자 하나마다 줄바꿈된다 -
+                아래 reasoning 문단엔 이미 있었는데 상품명엔 빠져 있었다. */}
+            <p className="mt-1 text-lg font-medium text-neutral-950 break-keep">{displayed.product_name}</p>
+            <p className="text-sm font-light text-neutral-500 break-keep">{displayed.retailer}</p>
             <p className="mt-1.5 text-sm font-light text-neutral-600 leading-relaxed break-keep">{displayed.reasoning}</p>
           </div>
         </div>
@@ -649,11 +657,11 @@ export const SearchResults = ({
                       size="sm"
                       rank={matched.url ? rankByUrl[matched.url] : undefined}
                     />
-                    <div className="min-w-0 flex flex-col items-start gap-1">
+                    <div className="min-w-0 flex-1 flex flex-col items-start gap-1">
                       <TopBadge url={matched.url} />
-                      <span className="text-xs font-medium text-neutral-950">{g.label}</span>
-                      <span className="text-xs font-light text-neutral-500 leading-relaxed">{g.description}</span>
-                      <span className="text-xs font-light text-neutral-600 mt-1">
+                      <span className="text-xs font-medium text-neutral-950 break-keep">{g.label}</span>
+                      <span className="text-xs font-light text-neutral-500 leading-relaxed break-keep">{g.description}</span>
+                      <span className="text-xs font-light text-neutral-600 mt-1 break-keep">
                         {matched.product_name} · {matched.price || '가격 미확인'}
                       </span>
                     </div>
