@@ -154,13 +154,13 @@ async def run_benchmark(
     with summary_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(
-            ["id", "category", "version", "status", "latency_ms", "total_prompt_tokens", "total_completion_tokens", "relevance_match"]
+            ["id", "category", "query", "version", "status", "latency_ms", "total_prompt_tokens", "total_completion_tokens", "relevance_match", "decision_product_name"]
         )
         for r in results:
             total_prompt = sum(u.get("prompt_tokens") or 0 for u in r["usage"])
             total_completion = sum(u.get("completion_tokens") or 0 for u in r["usage"])
             writer.writerow(
-                [r["id"], r["category"], r["version"], r["status"], r["latency_ms"], total_prompt, total_completion, r["relevance_match"]]
+                [r["id"], r["category"], r["query"], r["version"], r["status"], r["latency_ms"], total_prompt, total_completion, r["relevance_match"], r["decision_product_name"]]
             )
 
     print(f"\n결과 저장: {out_path}")
