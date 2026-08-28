@@ -6,8 +6,34 @@ import { useSidebar } from '../context/SidebarContext';
 import { fetchAutocomplete } from '../lib/api';
 import { StreamingCard, ErrorCard, SearchResults } from './SearchResults';
 
+// 모바일 성능 리포트(2026-08-28, "사이드바 누르면 3초 있다가 반응함")를 프로덕션
+// 배포본에서 직접 프로파일링(모바일 뷰포트 + CPU 6~8x 스로틀)한 결과, 사이드바
+// 클릭-반응 지연 자체는 70~174ms로 재현되지 않았다 - 대신 발견한 건 아래
+// "장식용 배경"(그레인 블롭 2개 + 무한 회전 링 3개)이 대화 시작 전/후 관계없이
+// 화면에 있는 내내(hasConversation 여부와 무관하게 이 셋은 그 분기보다 위에서
+// 항상 렌더링됨) requestAnimationFrame으로 영원히 돈다는 점 - blur(120px) +
+// mix-blend-multiply 조합은 모바일 GPU에서 특히 비싸고, 이게 매 프레임 다른
+// 애니메이션(사이드바 트랜지션 포함)과 같은 프레임 예산을 두고 경쟁해 전반적인
+// "버벅임" 체감으로 이어질 수 있다. 데스크톱은 그대로 두고(사용자가 요청한 범위는
+// "핸드폰만") 모바일 뷰포트에서만 이 장식 레이어 자체를 마운트하지 않는다 -
+// CSS로 숨기기만 하면 framer-motion의 rAF 루프 자체는 계속 돌아가므로, 진짜
+// 비용을 없애려면 아예 렌더링을 안 해야 한다.
+const useIsMobile = () => {
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
+  );
+  useEffect(() => {
+    const mql = window.matchMedia('(max-width: 767px)');
+    const onChange = () => setIsMobile(mql.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+  return isMobile;
+};
+
 export const Hero = () => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
   const { scrollY } = useScroll();
 
   const yBg = useTransform(scrollY, [0, 500], [0, 100]);
@@ -247,36 +273,45 @@ export const Hero = () => {
       ref={containerRef}
       className={`relative flex flex-col bg-white ${hasConversation ? 'h-screen' : 'min-h-screen'}`}
     >
-      {/* 1. Cinematic Grain & Gradient Background */}
-      <motion.div style={{ y: yBg }} className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
-        <div className="absolute inset-0 opacity-[0.05] mix-blend-overlay bg-[url('https://grainy-gradients.vercel.app/noise.svg')]" />
-        <div className="absolute top-[-20%] left-[20%] w-[60vw] h-[60vw] bg-violet-900/[0.06] rounded-full blur-[120px] mix-blend-multiply" />
-        <div className="absolute bottom-[-20%] right-[20%] w-[50vw] h-[50vw] bg-blue-900/[0.06] rounded-full blur-[120px] mix-blend-multiply" />
-      </motion.div>
+      {/* 1. Cinematic Grain & Gradient Background - 모바일에서는 아예 렌더링하지
+          않는다(위 useIsMobile 주석 참고). blur-[120px] + mix-blend-multiply
+          조합이 모바일 GPU에 특히 부담이고, hasConversation과 무관하게(이
+          분기보다 위에 있어서) 대화 중에도 계속 떠 있던 레이어다. */}
+      {!isMobile && (
+        <motion.div style={{ y: yBg }} className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
+          <div className="absolute top-[-20%] left-[20%] w-[60vw] h-[60vw] bg-violet-900/[0.06] rounded-full blur-[120px] mix-blend-multiply" />
+          <div className="absolute bottom-[-20%] right-[20%] w-[50vw] h-[50vw] bg-blue-900/[0.06] rounded-full blur-[120px] mix-blend-multiply" />
+        </motion.div>
+      )}
 
-      {/* 2. Technical Grid Overlay */}
+      {/* 2. Technical Grid Overlay - 정적 배경(애니메이션 없음)이라 모바일에서도 그대로 둔다. */}
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#00000008_1px,transparent_1px),linear-gradient(to_bottom,#00000008_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_80%_80%_at_50%_50%,#000_70%,transparent_100%)] pointer-events-none z-0" />
 
-      {/* 3. Precision Geometric Rings */}
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-0 overflow-hidden">
-        <motion.div
-          animate={{ rotate: 360 }}
-          transition={{ duration: 60, repeat: Infinity, ease: 'linear' }}
-          className="absolute w-[600px] h-[600px] md:w-[800px] md:h-[800px] rounded-full border border-black/10 border-dashed opacity-50"
-        />
-        <motion.div
-          animate={{ rotate: -360 }}
-          transition={{ duration: 80, repeat: Infinity, ease: 'linear' }}
-          className="absolute w-[450px] h-[450px] md:w-[600px] md:h-[600px] rounded-full border border-black/10 opacity-40"
-        >
-          <div className="absolute top-1/2 left-0 -translate-x-1/2 -translate-y-1/2 w-2 h-2 bg-black rounded-full shadow-[0_0_15px_rgba(0,0,0,0.8)]" />
-        </motion.div>
-        <motion.div
-          animate={{ rotate: 180 }}
-          transition={{ duration: 100, repeat: Infinity, ease: 'linear' }}
-          className="absolute w-[800px] h-[800px] md:w-[1100px] md:h-[1100px] rounded-full border border-black/5 border-dotted opacity-50"
-        />
-      </div>
+      {/* 3. Precision Geometric Rings - 무한 회전(repeat: Infinity) 애니메이션 3개가
+          hasConversation과 무관하게 화면에 있는 내내 rAF를 계속 돌린다. 모바일에서는
+          아예 렌더링하지 않아 framer-motion이 이 컨트롤러 자체를 만들지 않게 한다 -
+          CSS로 숨기기만 하면(hidden 등) JS 애니메이션 루프는 계속 돈다. */}
+      {!isMobile && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-0 overflow-hidden">
+          <motion.div
+            animate={{ rotate: 360 }}
+            transition={{ duration: 60, repeat: Infinity, ease: 'linear' }}
+            className="absolute w-[600px] h-[600px] md:w-[800px] md:h-[800px] rounded-full border border-black/10 border-dashed opacity-50"
+          />
+          <motion.div
+            animate={{ rotate: -360 }}
+            transition={{ duration: 80, repeat: Infinity, ease: 'linear' }}
+            className="absolute w-[450px] h-[450px] md:w-[600px] md:h-[600px] rounded-full border border-black/10 opacity-40"
+          >
+            <div className="absolute top-1/2 left-0 -translate-x-1/2 -translate-y-1/2 w-2 h-2 bg-black rounded-full shadow-[0_0_15px_rgba(0,0,0,0.8)]" />
+          </motion.div>
+          <motion.div
+            animate={{ rotate: 180 }}
+            transition={{ duration: 100, repeat: Infinity, ease: 'linear' }}
+            className="absolute w-[800px] h-[800px] md:w-[1100px] md:h-[1100px] rounded-full border border-black/5 border-dotted opacity-50"
+          />
+        </div>
+      )}
 
       {!hasConversation ? (
         // 대화 시작 전: 기존 랜딩 히어로 그대로 (로고 + 태그라인 + 검색창 중앙 정렬)
