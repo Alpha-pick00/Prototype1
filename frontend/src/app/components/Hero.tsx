@@ -404,6 +404,13 @@ export const Hero = () => {
                         </div>
                       ) : (
                         <div className="flex flex-col items-end group">
+                          {turn.imagePreviewUrl && (
+                            <img
+                              src={turn.imagePreviewUrl}
+                              alt="업로드한 사진"
+                              className="max-w-[60%] max-h-48 rounded-2xl object-cover mb-1.5"
+                            />
+                          )}
                           <div className="max-w-[80%] rounded-[18px_18px_4px_18px] bg-neutral-950 text-white px-4 py-2.5 text-sm md:text-base font-light text-left break-words">
                             {turn.displayQuery}
                           </div>

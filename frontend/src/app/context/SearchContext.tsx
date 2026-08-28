@@ -71,6 +71,10 @@ export interface ChatTurn {
   // 메시지 시간 표시(사용자 요청, "클로드 너처럼 날짜기능") - epoch ms.
   // loadFromHistory는 실제 기록 시각을 쓰고, 그 외엔 턴 생성 시각.
   createdAt: number;
+  // 사진 업로드로 시작한 턴의 미리보기 썸네일(시연 영상용, 2026-08-28) -
+  // URL.createObjectURL(file) 결과라 브라우저 메모리에만 존재하고 새로고침하면
+  // 사라진다. 서버에 영구 저장할 필요가 없는 가벼운 용도라 일부러 이렇게 뒀다.
+  imagePreviewUrl?: string;
 }
 
 // ChatGPT/Gemini처럼 "창(대화)" 하나에 여러 턴이 계속 이어지고, 새 상품을 검색할
@@ -97,7 +101,7 @@ interface SearchContextValue {
   // 반영(우선순위를 앞으로 당기는 것)은 백엔드(check_clarify_facets)가 이미
   // 하므로, 여기서는 순수하게 시각적 표시 용도다.
   sessionPreferences: Record<string, string>;
-  sendMessage: (q: string) => Promise<void>;
+  sendMessage: (q: string, imagePreviewUrl?: string) => Promise<void>;
   selectFacets: (turnId: string, selected: Record<string, string[]>) => Promise<void>;
   // 조건을 하나도 안 고르고 원래 질의 그대로 포괄적으로 검색한다(2026-08-24).
   searchBroadly: (turnId: string) => Promise<void>;
@@ -143,7 +147,8 @@ const newTurn = (
   requestQuery: string,
   baseQuery?: string,
   facetAnswers?: Record<string, string[]>,
-  hideUserBubble?: boolean
+  hideUserBubble?: boolean,
+  imagePreviewUrl?: string
 ): ChatTurn => ({
   id: crypto.randomUUID(),
   displayQuery,
@@ -157,6 +162,7 @@ const newTurn = (
   streamingStage: null,
   streamingProposals: [],
   createdAt: Date.now(),
+  imagePreviewUrl,
 });
 
 export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
@@ -389,10 +395,10 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
 
   // 활성 대화가 있으면 그 대화에 이어붙이고(ChatGPT에서 입력창에 타이핑하는 것과
   // 동일), 없으면(방금 새 검색을 눌렀거나 첫 방문) 새 대화를 연다.
-  const sendMessage = async (q: string) => {
+  const sendMessage = async (q: string, imagePreviewUrl?: string) => {
     const trimmed = q.trim();
     if (!trimmed) return;
-    const turn = newTurn(trimmed, trimmed);
+    const turn = newTurn(trimmed, trimmed, undefined, undefined, undefined, imagePreviewUrl);
     appendTurn(activeConversationId, turn);
     await runTurn(turn.id, turn.requestQuery, turn.baseQuery);
   };
@@ -509,11 +515,14 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
 
   const handleImageUpload = async (file: File) => {
     setOcrBusy(true);
+    // 시연 영상용 썸네일(2026-08-28) - 서버 저장 없이 브라우저 메모리에만
+    // 두는 가벼운 방식이라, 새로고침하면 사라지지만 이번 용도엔 그걸로 충분하다.
+    const imageUrl = URL.createObjectURL(file);
     try {
       const { ocr, cleaned } = await extractOcr(file);
 
       if (cleaned?.search_query?.trim()) {
-        await sendMessage(cleaned.search_query.trim());
+        await sendMessage(cleaned.search_query.trim(), imageUrl);
         return;
       }
 
@@ -530,7 +539,7 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
       // 해당 안 되고 아래 폴백 체인으로 그대로 넘어간다.
       if (cleaned && !cleaned.error) {
         appendTurn(activeConversationId, {
-          ...newTurn('(이미지)', ''),
+          ...newTurn('(이미지)', '', undefined, undefined, undefined, imageUrl),
           status: 'error',
           errorMessage: '사진에서 특정 상품을 찾기 어려워요. 상품만 잘 보이게 다시 찍어주시겠어요?',
         });
@@ -544,16 +553,16 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
       const extractedText = (cleaned?.cleaned_text || ocr.text || '').trim();
       if (!extractedText) {
         appendTurn(activeConversationId, {
-          ...newTurn('(이미지)', ''),
+          ...newTurn('(이미지)', '', undefined, undefined, undefined, imageUrl),
           status: 'error',
           errorMessage: ocr.error || '이미지에서 텍스트를 찾지 못했습니다.',
         });
         return;
       }
-      await sendMessage(extractedText);
+      await sendMessage(extractedText, imageUrl);
     } catch (err) {
       appendTurn(activeConversationId, {
-        ...newTurn('(이미지)', ''),
+        ...newTurn('(이미지)', '', undefined, undefined, undefined, imageUrl),
         status: 'error',
         errorMessage:
           err instanceof ApiError ? err.message : '이미지 분석 중 문제가 발생했습니다. 잠시 후 다시 시도해주세요.',
