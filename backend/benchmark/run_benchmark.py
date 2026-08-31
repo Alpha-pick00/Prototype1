@@ -69,8 +69,11 @@ async def run_one(
         "http_status": None,
         "latency_ms": None,
         "decision_product_name": None,
+        "decision_price": None,
+        "price_table_offers": None,
         "relevance_match": None,
         "usage": [],
+        "usage_by_node": {},
         "error": None,
     }
     async with semaphore:
@@ -98,13 +101,48 @@ async def run_one(
             body = resp.json()
             decision = body.get("decision") or {}
             product_name = decision.get("product_name")
+            decision_price = decision.get("price")
+            if not product_name:
+                # bulk 모드(2026-08-31, baseline이 수량/용량 표현이 있는 질의를
+                # 자동으로 다수 옵션 응답으로 라우팅함 - app/intent.py의
+                # is_bulk_query 참고)는 product_name 없이 decision.options[]를
+                # 반환한다. 벤치마크는 top-1 단일 결정 구조를 가정하므로, 이
+                # 경우 1순위 옵션을 그 자리로 승격해 채점한다 - 그러지 않으면
+                # 수량 표현이 있는 쿼리 전부가 채점 불가(None)로 빠져 baseline
+                # 성능이 실제보다 낮게 측정된다.
+                options = decision.get("options") or []
+                if options:
+                    product_name = options[0].get("product_name")
+                    decision_price = options[0].get("price")
             result["decision_product_name"] = product_name
+            result["decision_price"] = decision_price
             if product_name:
                 result["relevance_match"] = bool(_product_name_matches(item["query"], product_name))
+
+            # 가격 정확도 지표용(2026-08-31) - price_table.offers는 판매처별
+            # 실측가 목록(price_table.py 구조 참고). 여기서 원본 그대로
+            # 저장해두고, 집계 스크립트에서 "추천가가 표시된 최저가 대비 몇 %
+            # 차이 나는가"를 계산한다.
+            price_table = body.get("price_table") or {}
+            offers = price_table.get("offers")
+            if offers:
+                result["price_table_offers"] = offers
         except Exception as exc:
             result["status"] = "error"
             result["error"] = f"response parse failed: {exc}"
             return result
+
+        # 비용 지표용(2026-08-31) - adk_pipeline.run()이 남긴 노드별 토큰
+        # 사용량을 응답 헤더(X-Usage)로 받는다. baseline은 bulk/clarify/
+        # danawa-only 경로나 ADK 밖 폴백 헬퍼 호출까지는 못 잡아 실제 총
+        # 비용의 하한선(under-count)일 수 있다 - 집계 리포트에서 이 한계를
+        # 반드시 함께 표시해야 한다.
+        usage_header = resp.headers.get("X-Usage")
+        if usage_header:
+            try:
+                result["usage_by_node"] = json.loads(usage_header)
+            except json.JSONDecodeError:
+                pass
 
         request_id = resp.headers.get("X-Request-Id")
         if request_id:

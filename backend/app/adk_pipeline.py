@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from contextvars import ContextVar
 from typing import Any, AsyncGenerator, AsyncIterator
 
 from google.adk.agents import BaseAgent, LlmAgent, ParallelAgent, SequentialAgent
@@ -974,9 +975,20 @@ async def _run_pipeline_once(
         session_id=session_id,
         new_message=types.Content(role="user", parts=[types.Part(text=query)]),
     )
+    # 벤치마크 비용 지표용 usage 집계(2026-08-31) - ADK Event.usage_metadata를
+    # 노드(author)별로 모아 최종 state에 얹는다. main.py가 이 값을 HTTP 응답
+    # 헤더(X-Usage)로 흘려보내 벤치마크 스크립트가 읽는다 - DecideResponse
+    # 스키마 자체를 건드리지 않아 프론트/history 등 기존 소비자에 영향 없다.
+    usage_by_node: dict[str, dict[str, int]] = {}
     try:
         async for _event in gen:
-            pass
+            meta = getattr(_event, "usage_metadata", None)
+            if meta is None:
+                continue
+            node = _event.author or "unknown"
+            bucket = usage_by_node.setdefault(node, {"prompt_tokens": 0, "completion_tokens": 0})
+            bucket["prompt_tokens"] += meta.prompt_token_count or 0
+            bucket["completion_tokens"] += meta.candidates_token_count or 0
     except RuntimeError as exc:
         return None, str(exc)
     except Exception:
@@ -986,7 +998,9 @@ async def _run_pipeline_once(
     final_session = await runner.session_service.get_session(
         app_name=_APP_NAME, user_id="anonymous", session_id=session_id
     )
-    return (dict(final_session.state) if final_session else {}), None
+    result_state = dict(final_session.state) if final_session else {}
+    result_state["_usage_by_node"] = usage_by_node
+    return result_state, None
 
 
 async def run_stream(
@@ -1039,7 +1053,20 @@ async def run_stream(
         proposals=proposals_raw,
         decision=decision,
     )
-    yield {"type": "final", "result": result.model_dump()}
+    yield {
+        "type": "final",
+        "result": result.model_dump(),
+        "usage_by_node": state.get("_usage_by_node") or {},
+    }
+
+
+# 벤치마크 비용 지표용(2026-08-31) - run()의 시그니처/반환 타입은 다른
+# 호출부(debate.py 등)와의 계약이라 건드리지 않고, 대신 요청 스코프
+# contextvar로 마지막 실행의 usage를 사이드채널로 흘려보낸다. main.py가
+# 매 /decide 요청 직후 이 값을 읽어 HTTP 응답 헤더(X-Usage)에 싣는다.
+last_run_usage_by_node: ContextVar[dict[str, dict[str, int]]] = ContextVar(
+    "last_run_usage_by_node", default={}
+)
 
 
 async def run(
@@ -1052,6 +1079,7 @@ async def run(
     async for event in run_stream(query, base_query=base_query, facet_answers=facet_answers):
         if event["type"] == "final":
             result = DecideResponse.model_validate(event["result"])
+            last_run_usage_by_node.set(event.get("usage_by_node") or {})
         elif event["type"] == "error":
             error_message = event["message"]
     if result is None:

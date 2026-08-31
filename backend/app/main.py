@@ -5,12 +5,12 @@ import logging
 import jwt
 
 logging.basicConfig(level=logging.INFO)
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import adk_pipeline, autocomplete, history, preferences
+from . import adk_pipeline, autocomplete, history, preferences, usage_tracking
 from .auth import google as google_auth
 from .auth import kakao as kakao_auth
 from .auth import naver as naver_auth
@@ -182,7 +182,10 @@ async def ocr_extract(image: UploadFile) -> OcrExtractResponse:
 
 
 @app.post("/decide", response_model=DecideResponse)
-async def decide(request: DecideRequest, background_tasks: BackgroundTasks) -> DecideResponse:
+async def decide(
+    request: DecideRequest, background_tasks: BackgroundTasks, response: Response
+) -> DecideResponse:
+    usage_tracking.reset()
     try:
         # 메인 검색 흐름은 ADK 8단계 SequentialAgent 파이프라인(adk_pipeline.run -
         # refine/search/propose/filter_merge/extract_pages/challenge/
@@ -207,6 +210,15 @@ async def decide(request: DecideRequest, background_tasks: BackgroundTasks) -> D
         ) from exc
 
     background_tasks.add_task(autocomplete.record_terms, _autocomplete_terms(request, result))
+    # 벤치마크 비용 지표용(2026-08-31) - ADK LlmAgent 노드(usage_metadata 자동
+    # 집계, adk_pipeline.last_run_usage_by_node)와 apply_challenge처럼 ADK 밖에서
+    # 직접 LLM을 부르는 커스텀 노드(usage_tracking 모듈)의 usage를 합쳐 헤더로
+    # 노출한다. DecideResponse 스키마는 안 건드려 프론트/history 등 기존
+    # 소비자에 영향 없다.
+    usage_tracking.merge(adk_pipeline.last_run_usage_by_node.get())
+    usage_by_node = usage_tracking.usage_by_node.get()
+    if usage_by_node:
+        response.headers["X-Usage"] = json.dumps(usage_by_node, ensure_ascii=False)
     return result
 
 

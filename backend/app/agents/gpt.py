@@ -3,6 +3,7 @@ import re
 
 from openai import AsyncOpenAI
 
+from .. import usage_tracking
 from ..config import settings
 from .base import build_candidate_notes_prompt, build_recommend_prompt, build_refine_query_prompt, parse_json_object
 
@@ -145,6 +146,7 @@ async def candidate_notes(query: str, candidates: list[dict]) -> dict[int, str]:
             temperature=0,
             messages=[{"role": "user", "content": build_candidate_notes_prompt(query, candidates, note_indices)}],
         )
+        usage_tracking.record_openai_response("gpt.candidate_notes", response)
         text = response.choices[0].message.content or ""
         notes = _parse_candidate_notes(text, candidates)
         return notes
